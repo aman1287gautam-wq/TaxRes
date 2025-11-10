@@ -121,10 +121,10 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False):
             if rnor9: parts.append("9/10 prior Non-Resident")
             if rnor7: parts.append("≤729 days in 7 FYs")
             reason = f"{base} → RNOR ({' | '.join(parts)})"
-            residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
+            residency[y] = ("RNOR", days)
         else:
             reason = f"{base} → ROR"
-            residency[y] = ("Resident and Ordinarily Resident (ROR)", days)
+            residency[y] = ("ROR", days)
         reasons[y] = reason
 
     total = sum(fy_days.values())
