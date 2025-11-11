@@ -156,15 +156,15 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             residency[y] = ("Resident (Deemed u/s 6(1A))", days)
             reasons[y] = "Citizen + Income >15L + Not taxed abroad → Deemed Resident"
             is_res = True
-      elif not is_res:
-    # more precise reasoning
-    if days < threshold:
+              elif not is_res:
+             # more precise reasoning
+           if days < threshold:
         reason = f"<{threshold} days"
-    else:
-        reason = f"≥{threshold} days but prior 4 FYs {prior4_days}<365"
-    residency[y] = ("Non-Resident", days)
-    reasons[y] = reason
-    continue
+        else:
+          reason = f"≥{threshold} days but prior 4 FYs {prior4_days}<365"
+      residency[y] = ("Non-Resident", days)
+      reasons[y] = reason
+        continue
 
         else:
             base = f"≥{threshold} days"
