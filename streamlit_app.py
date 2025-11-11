@@ -4,7 +4,7 @@ from collections import defaultdict
 import base64
 
 # === PASSWORD CONFIG ===
-APP_PASSWORD = "tax2025"          # Change this to your desired password
+APP_PASSWORD = "faiu2"          # Change this to your desired password
 SESSION_AUTH_KEY = "auth_status"
 
 # === AUTHENTICATION ===
