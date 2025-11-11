@@ -317,37 +317,88 @@ if st.session_state.results:
     st.success(f"**Total Days in India: {r['total']}**")
 
     colc1, colc2 = st.columns(2)
-    with colc1:
-        if st.button("📋 Copy Table", use_container_width=True):
+        with colc1:
+        if st.button("Copy Table", use_container_width=True):
             # Generate tab-separated text
             txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
                 f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
             )
             
-            # Display for immediate view
-            st.code(txt)
+            # Show in code block
+            st.code(txt, language="text")
             
-            # JS for clipboard (works in most browsers)
-            js_code = f"""
+            # === CLIPBOARD COPY USING HIDDEN TEXTAREA + JS ===
+            html_code = f"""
+            <textarea id="clipboard-text" style="position:absolute; left:-9999px;">{txt}</textarea>
             <script>
-            navigator.clipboard.writeText(`{txt.replace('`', '\\`')}`).then(function() {{
-                // Simple alert as toast alternative
-                alert('Table copied to clipboard! Paste with Ctrl+V');
-            }}).catch(function(err) {{
-                console.log('Copy failed: ', err);
-                alert('Copy failed - use download button');
-            }});
+            (function() {{
+                const textarea = document.getElementById('clipboard-text');
+                textarea.select();
+                textarea.setSelectionRange(0, 99999);
+                try {{
+                    const successful = document.execCommand('copy');
+                    parent.postMessage({{type: 'clipboard', success: successful}}, '*');
+                }} catch (err) {{
+                    parent.postMessage({{type: 'clipboard', success: false}}, '*');
+                }}
+                // Modern fallback
+                navigator.clipboard.writeText(`{txt.replace('`', '\\`')}`).then(
+                    () => parent.postMessage({{type: 'clipboard', success: true}}, '*'),
+                    () => parent.postMessage({{type: 'clipboard', success: false}}, '*')
+                );
+            }})();
             </script>
             """
-            st.components.v1.html(js_code, height=0)
+            # Inject JS + hidden textarea
+            components = st.components.v1.html(html_code, height=0, width=0)
             
-            # Fallback: Download button
-            csv_buffer = io.StringIO(txt)
+            # Listen for message from iframe (via session state hack)
+            if "clipboard_success" not in st.session_state:
+                st.session_state.clipboard_success = None
+            
+            # Use a hidden container to capture postMessage
+            st.markdown(
+                """
+                <script>
+                window.addEventListener('message', function(event) {
+                    if (event.data.type === 'clipboard') {
+                        // Forward to Streamlit via URL hack
+                        const url = new URL(window.location);
+                        url.searchParams.set('clipboard', event.data.success ? '1' : '0');
+                        window.location.search = url.search;
+                    }
+                });
+                </script>
+                """,
+                unsafe_allow_html=True
+            )
+            
+            # Check URL param
+            query_params = st.query_params
+            if "clipboard" in query_params:
+                success = query_params["clipboard"] == "1"
+                if success:
+                    st.toast("Copied to clipboard! Paste with Ctrl+V", icon="Success")
+                else:
+                    st.toast("Copy failed. Use Download button.", icon="Warning")
+                # Clear param
+                query_params.pop("clipboard", None)
+                st.session_state.clipboard_success = success
+            elif st.session_state.clipboard_success is not None:
+                # Show toast once
+                if st.session_state.clipboard_success:
+                    st.toast("Copied to clipboard! Paste with Ctrl+V", icon="Success")
+                else:
+                    st.toast("Copy failed. Use Download button.", icon="Warning")
+                st.session_state.clipboard_success = None
+
+            # Fallback: Download
             st.download_button(
-                label="💾 Download as TXT (Fallback)",
-                data=csv_buffer.getvalue(),
+                label="Download as TXT (Fallback)",
+                data=txt,
                 file_name="residency_table.txt",
-                mime="text/plain"
+                mime="text/plain",
+                use_container_width=True
             )
 
     with colc2:
