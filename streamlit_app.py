@@ -48,174 +48,77 @@ def smart_pair(arrs, deps):
             matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) → NO ARRIVAL")
     return pairs, matches
 
-def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False, income_15l=False, not_taxed_abroad=False, is_crew=False):
-    # --- parse employment FY selections into start-year ints robustly ---
-    emp_years = set()
-    for fy in (exc_fys or []):
-        if not fy:
-            continue
-        s = str(fy).strip()
-        # Accept formats like "2024-2025", "2024-25", "2024/25", or just "2024"
-        try:
-            if "-" in s:
-                start = s.split("-")[0]
-            elif "/" in s:
-                start = s.split("/")[0]
-            else:
-                start = s
-            start = start.strip()
-            emp_years.add(int(start))
-        except Exception:
-            # ignore malformed entries
-            continue
+def calculate_stay(data, income_above_15L=False, citizen=True):
+    residency = {}
+    reasons = {}
 
-    arrs = parse_dates(arr_str)
-    deps = parse_dates(dep_str)
-    paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
-    fy_days = defaultdict(int)
-    fy_trips = defaultdict(list)
-    warnings = []
-    seen = set()
+    # Create a list of FYs in order
+    years = sorted(data.keys())
 
-    # collect day counts per fiscal-year string as before (e.g. "2024-2025")
-    for i, (a, d) in enumerate(paired):
-        if not a or not d:
-            if a or d:
-                warnings.append(f"Trip {i+1}: skipped (missing pair)")
-            continue
-        if a > d:
-            warnings.append(f"Trip {i+1}: invalid (arr > dep)")
-            continue
-        days_count = (d - a).days + 1
-        trip_str = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} → {d.strftime('%d/%m/%Y')} ({days_count} days)"
-        cur = a
-        while cur <= d:
-            fy = fy_of(cur)
-            key = (fy, cur)
-            if key not in seen:
-                fy_days[fy] += 1
-                seen.add(key)
-                fy_trips[fy].append(trip_str)
-            cur += timedelta(days=1)
+    for i, y in enumerate(years):
+        days = data[y]
+        prior4_days = sum([data.get(years[j], 0) for j in range(max(0, i - 4), i)])
 
-    # Build integer-start-year set from observed fy_days keys
-    years_from_data = set()
-    for fy in fy_days.keys():
-        try:
-            years_from_data.add(int(fy.split("-")[0]))
-        except:
-            continue
-
-    # Ensure years_range includes emp_years (so employment FYs take effect even if 0 days)
-    all_years = set(years_from_data) | set(emp_years)
-    if not all_years:
-        # fallback to a reasonable default if nothing present (keep your existing default behaviour)
-        all_years = {2024}
-    years_range = range(min(all_years), max(all_years) + 1)
-
-    # map integer-year -> days in that FY
-    full_days = {y: fy_days.get(f"{y}-{y+1}", 0) for y in years_range}
-    sorted_fy = [f"{y}-{y+1}" for y in years_range]
-
-    residency, reasons = {}, {}
-
-    for y in years_range:
-        days = full_days.get(y, 0)
-        emp = y in emp_years
-
-        # === RESIDENCY THRESHOLD ===
+        # --- Step 1: Default threshold check ---
         threshold = 182
-        if is_crew:
-            threshold = 182  # Crew always 182
-        elif emp:
-            threshold = 182  # Employment abroad → 182 threshold
-        elif is_visitor and income_15l:
-            threshold = 120
-        elif is_visitor or is_citizen:
-            threshold = 182 if income_15l else 60
+        if days >= threshold:
+            is_res = True
         else:
-            threshold = 60
+            # Apply 60-day rule if total stay ≥ 365 days in preceding 4 FYs
+            if days >= 60 and prior4_days >= 365:
+                is_res = True
+                threshold = 60
+            else:
+                is_res = False
 
-        prior4_days = sum(full_days.get(y - i, 0) for i in range(1, 5))
+        # --- Step 2: Deemed resident (u/s 6(1A)) ---
+        deemed = False
+        if citizen and income_above_15L and days >= 120 and prior4_days >= 365:
+            deemed = True
+            is_res = True
 
-        # If >15L the special logic is simpler: use threshold only
-        if income_15l:
-            is_res = days >= threshold
-        else:
-            is_res = (days >= 182) or (days >= threshold and prior4_days >= 365)
-
-        # === DEEMED RESIDENCY (1A) ===
-        deemed = is_citizen and income_15l and not_taxed_abroad
-
-        if days == 0 and not deemed:
-            residency[y] = ("Non-Resident", 0)
-            reasons[y] = "0 days in India"
+        # --- Step 3: Assign residential status ---
+        if deemed:
+            residency[y] = "Resident (Deemed u/s 6(1A))"
+            reasons[y] = "Citizen + Income >15L + Not taxed abroad → Deemed Resident"
             continue
 
-        if deemed:
-            residency[y] = ("Resident (Deemed u/s 6(1A))", days)
-            reasons[y] = "Citizen + Income >15L + Not taxed abroad → Deemed Resident"
-            is_res = True
-              elif not is_res:
-             # more precise reasoning
-           if days < threshold:
-        reason = f"<{threshold} days"
+        elif not is_res:
+            # Non-Resident
+            if days < 60:
+                reason = f"<60 days | Prior 4 FYs {prior4_days}<365"
+            elif days < 182:
+                reason = f"≥60 days but Prior 4 FYs {prior4_days}<365"
+            else:
+                reason = f"≥182 days"
+            residency[y] = "Non-Resident"
+            reasons[y] = reason
+            continue
+
+        # --- Step 4: Resident but check RNOR/ROR ---
+        # Count number of resident years in last 10 FYs
+        past10 = [years[j] for j in range(max(0, i - 10), i)]
+        resident_count = sum(1 for yr in past10 if residency.get(yr, "").startswith("Resident"))
+        total_days_7yrs = sum([data.get(years[j], 0) for j in range(max(0, i - 7), i)])
+
+        if resident_count < 2 or total_days_7yrs < 730:
+            residency[y] = "Resident but Not Ordinarily Resident (RNOR)"
+            reasons[y] = f"Resident <2 of last 10 FYs or <730 days in past 7 FYs"
         else:
-          reason = f"≥{threshold} days but prior 4 FYs {prior4_days}<365"
-      residency[y] = ("Non-Resident", days)
-      reasons[y] = reason
-        continue
+            residency[y] = "Resident and Ordinarily Resident (ROR)"
+            reasons[y] = f"≥60 days → ROR"
 
-        else:
-            base = f"≥{threshold} days"
-            if days >= 182:
-                base = "≥182 days"
-            elif emp:
-                base = "≥182 (Employment)"
-            elif threshold == 120:
-                base = "≥120 (Visitor + >15L)"
-            residency[y] = ("Resident", days)
-            reasons[y] = base
+    # --- Step 5: Return final data ---
+    result = []
+    for y in years:
+        result.append({
+            "FY": y,
+            "Days": data[y],
+            "Status": residency[y],
+            "Reason": reasons[y]
+        })
+    return result
 
-               # === RNOR LOGIC (apply only if we have sufficient prior data) ===
-        prior7 = [x for x in range(y - 7, y) if x in full_days]
-        prior10 = [x for x in range(y - 10, y) if x in full_days]
-
-        # Check if we have sufficient data (>=7 or >=10 prior FYs)
-        enough_data_7 = len(prior7) >= 7
-        enough_data_10 = len(prior10) >= 10
-
-        # Only compute RNOR if enough prior years exist
-        if enough_data_7 or enough_data_10:
-            prev7_days = sum(full_days.get(x, 0) for x in prior7)
-            non_res10 = sum(1 for x in prior10 if residency.get(x, ("Non-Resident", 0))[0] == "Non-Resident")
-            rnor7 = enough_data_7 and prev7_days <= 729
-            rnor9 = enough_data_10 and non_res10 >= 9
-        else:
-            rnor7 = rnor9 = False
-
-        # RNOR also if visitor with 120–181 days + >15L income, or deemed
-        rnor_visitor = is_visitor and income_15l and 120 <= days < 182
-        rnor_deemed = deemed
-
-        is_rnor = rnor7 or rnor9 or rnor_visitor or rnor_deemed
-
-        if is_rnor:
-            parts = []
-            if rnor9: parts.append("9/10 prior NR")
-            if rnor7: parts.append("≤729 days in 7 FYs")
-            if rnor_visitor: parts.append("120–181 days + >15L visitor")
-            if rnor_deemed: parts.append("Deemed resident")
-            reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
-            residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
-        else:
-            reason = f"{reasons[y]} → ROR"
-            residency[y] = ("ROR", days)
-        reasons[y] = reason
-
-    total = sum(fy_days.values())
-    warn_msg = "\n".join(warnings) if warnings else ""
-    return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log
 
 # === STREAMLIT UI ===
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
