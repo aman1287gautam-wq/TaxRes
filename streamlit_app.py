@@ -308,40 +308,47 @@ if st.session_state.results:
     # COPY-TO-CLIPBOARD (fixed)
     # -------------------------------------------------
     colc1, colc2 = st.columns(2)
-    with colc1:
+        with colc1:
         if st.button("Copy Table", use_container_width=True):
+            # Generate tab-separated text
             txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
                 f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
             )
             st.code(txt, language="text")
 
-            # ---- hidden textarea + JS ----
-            html = f"""
+            # === ESCAPE BACKTICKS FOR JS ===
+            txt_js = txt.replace("\\", "\\\\").replace("`", "\\`").replace('"', '\\"')
+
+            # === HIDDEN TEXTAREA + JS (NO F-STRING CONFLICT) ===
+            html = f'''
             <textarea id="cliptext" style="position:absolute;left:-9999px;">{txt}</textarea>
             <script>
             (function(){{
                 const ta = document.getElementById('cliptext');
                 ta.select();
-                ta.setSelectionRange(0,99999);
-                try{{ document.execCommand('copy'); }}catch(e){}
-                navigator.clipboard.writeText(`{txt.replace('`','\\`')}`).then(
-                    () => parent.postMessage({{type:'clip',ok:true}},'*'),
-                    () => parent.postMessage({{type:'clip',ok:false}},'*')
+                ta.setSelectionRange(0, 99999);
+                let success = false;
+                try {{ 
+                    success = document.execCommand('copy'); 
+                }} catch(e) {{}}
+                navigator.clipboard.writeText("{txt_js}").then(
+                    () => parent.postMessage({{type:'clip',ok:true}}, '*'),
+                    () => parent.postMessage({{type:'clip',ok:false}}, '*')
                 );
             }})();
             </script>
-            """
+            '''
             components.html(html, height=0, width=0)
 
-            # ---- message listener (URL-param hack) ----
+            # === MESSAGE LISTENER ===
             st.markdown(
                 """
                 <script>
-                window.addEventListener('message',e=>{
-                    if(e.data.type==='clip'){
-                        const p=new URLSearchParams(location.search);
-                        p.set('clip',e.data.ok?'1':'0');
-                        history.replaceState(null,null,'?'+p.toString());
+                window.addEventListener('message', e => {
+                    if (e.data.type === 'clip') {
+                        const p = new URLSearchParams(location.search);
+                        p.set('clip', e.data.ok ? '1' : '0');
+                        history.replaceState(null, null, '?' + p.toString());
                     }
                 });
                 </script>
@@ -349,13 +356,15 @@ if st.session_state.results:
                 unsafe_allow_html=True
             )
 
-            # ---- show toast ----
+            # === SHOW TOAST ===
             qp = st.query_params
             if "clip" in qp:
                 ok = qp["clip"] == "1"
-                st.toast("Copied to clipboard! Paste with Ctrl+V" if ok else "Copy failed – use Download", icon="Success" if ok else "Warning")
+                st.toast("Copied to clipboard! Paste with Ctrl+V" if ok else "Copy failed – use Download", 
+                        icon="Success" if ok else "Warning")
                 qp.pop("clip", None)
-            # fallback download
+
+            # === FALLBACK DOWNLOAD ===
             st.download_button(
                 "Download as TXT (fallback)",
                 data=txt,
@@ -363,7 +372,7 @@ if st.session_state.results:
                 mime="text/plain",
                 use_container_width=True
             )
-
+            
     with colc2:
         report = f"""FULL INDIA TAX RESIDENCY REPORT (SECTION 6)
 {'='*60}
