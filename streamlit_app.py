@@ -3,11 +3,11 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import base64
 import streamlit.components.v1 as components
-import pandas as pd   # <-- NEW: for Excel export
-import io             # <-- for in-memory Excel file
+import pandas as pd
+import io
 
 # -------------------------------------------------
-# Helper functions (unchanged)
+# Helper Functions
 # -------------------------------------------------
 def parse_dates(text: str):
     dates = []
@@ -171,7 +171,9 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
     warn_msg = "\n".join(warnings) if warnings else ""
     return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log
 
-# === UI ===
+# -------------------------------------------------
+# Streamlit UI
+# -------------------------------------------------
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
 st.title("India Tax Residency Calculator (Section 6 - Full Rules)")
 st.markdown("**100% compliant with IT Act 1961** • 6(1A) Deemed • 120-day • RNOR(c)(d) • Crew • Smart Pairing")
@@ -209,7 +211,7 @@ if clear:
     st.rerun()
 
 fy_options = st.session_state.results["fy_list"] if st.session_state.results else []
-emp_fys = st.multiselect("Employment Abroad FYs (182-day rule applies)", options=fy_options, help="Select FYs where the person was employed outside India")
+emp_fys = st.multiselect("Employment Abroad FYs (182-day rule applies)", options=fy_options)
 
 if calculate:
     if not arr.strip() or not dep.strip():
@@ -229,7 +231,9 @@ if calculate:
             except Exception as e:
                 st.error(f"Calculation error: {e}")
 
-# === DISPLAY RESULTS ===
+# -------------------------------------------------
+# DISPLAY RESULTS
+# -------------------------------------------------
 if st.session_state.results:
     r = st.session_state.results
 
@@ -329,14 +333,17 @@ if st.session_state.results:
             )
 
     with colc2:
-        # === EXPORT TO EXCEL ===
+        # === EXPORT TO EXCEL (using xlsxwriter - pre-installed) ===
         df_excel = pd.DataFrame(data)
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_excel.to_excel(writer, index=False, sheet_name='Residency')
+            worksheet = writer.sheets['Residency']
+            for i, col in enumerate(df_excel.columns):
+                max_len = max(df_excel[col].astype(str).map(len).max(), len(col)) + 2
+                worksheet.set_column(i, i, max_len)
         output.seek(0)
         b64_excel = base64.b64encode(output.read()).decode()
-
         href_excel = f'''
         <a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_excel}"
            download="Tax_Residency_Report_{datetime.now().strftime('%Y%m%d')}.xlsx">
@@ -345,7 +352,7 @@ if st.session_state.results:
         '''
         st.markdown(href_excel, unsafe_allow_html=True)
 
-        # Full Report Download (TXT)
+        # === FULL REPORT (TXT) ===
         report = f"""FULL INDIA TAX RESIDENCY REPORT (SECTION 6)
 {'='*60}
 Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
