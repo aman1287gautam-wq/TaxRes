@@ -48,43 +48,58 @@ def smart_pair(arrs, deps):
             matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) → NO ARRIVAL")
     return pairs, matches
 
-def calculate_stay(data, income_above_15L=False, citizen=True):
+def calculate_stay(arrivals, departures, emp_fys=None, smart=False, citizen=True, visitor=False,
+                   income_above_15L=False, not_taxed_abroad=False, is_crew=False):
+
+    # --- Step 1: Calculate days per FY ---
+    from datetime import datetime
+
+    data = {}
+    for fy, (arr, dep) in enumerate(zip(arrivals, departures), start=1):
+        if not arr or not dep:
+            continue
+        # ensure both are datetime
+        if isinstance(arr, str):
+            arr = datetime.strptime(arr, "%d/%m/%Y")
+        if isinstance(dep, str):
+            dep = datetime.strptime(dep, "%d/%m/%Y")
+
+        days = abs((dep - arr).days)
+        data[f"FY-{2010 + fy}-{2011 + fy}"] = days
+
     residency = {}
     reasons = {}
 
-    # Create a list of FYs in order
     years = sorted(data.keys())
 
     for i, y in enumerate(years):
         days = data[y]
         prior4_days = sum([data.get(years[j], 0) for j in range(max(0, i - 4), i)])
 
-        # --- Step 1: Default threshold check ---
+        # --- Step 2: Base rule ---
         threshold = 182
         if days >= threshold:
             is_res = True
         else:
-            # Apply 60-day rule if total stay ≥ 365 days in preceding 4 FYs
             if days >= 60 and prior4_days >= 365:
                 is_res = True
                 threshold = 60
             else:
                 is_res = False
 
-        # --- Step 2: Deemed resident (u/s 6(1A)) ---
+        # --- Step 3: Deemed resident (Sec 6(1A)) ---
         deemed = False
-        if citizen and income_above_15L and days >= 120 and prior4_days >= 365:
+        if citizen and income_above_15L and not_taxed_abroad and days >= 120 and prior4_days >= 365:
             deemed = True
             is_res = True
 
-        # --- Step 3: Assign residential status ---
+        # --- Step 4: Assign status ---
         if deemed:
             residency[y] = "Resident (Deemed u/s 6(1A))"
             reasons[y] = "Citizen + Income >15L + Not taxed abroad → Deemed Resident"
             continue
 
         elif not is_res:
-            # Non-Resident
             if days < 60:
                 reason = f"<60 days | Prior 4 FYs {prior4_days}<365"
             elif days < 182:
@@ -95,8 +110,7 @@ def calculate_stay(data, income_above_15L=False, citizen=True):
             reasons[y] = reason
             continue
 
-        # --- Step 4: Resident but check RNOR/ROR ---
-        # Count number of resident years in last 10 FYs
+        # --- Step 5: Resident but RNOR/ROR check ---
         past10 = [years[j] for j in range(max(0, i - 10), i)]
         resident_count = sum(1 for yr in past10 if residency.get(yr, "").startswith("Resident"))
         total_days_7yrs = sum([data.get(years[j], 0) for j in range(max(0, i - 7), i)])
@@ -108,16 +122,16 @@ def calculate_stay(data, income_above_15L=False, citizen=True):
             residency[y] = "Resident and Ordinarily Resident (ROR)"
             reasons[y] = f"≥60 days → ROR"
 
-    # --- Step 5: Return final data ---
-    result = []
-    for y in years:
-        result.append({
-            "FY": y,
-            "Days": data[y],
-            "Status": residency[y],
-            "Reason": reasons[y]
-        })
-    return result
+    # --- Step 6: prepare output variables to match your unpacking ---
+    fy_list = years
+    fy_days = [data[y] for y in years]
+    total = sum(fy_days)
+    warns = []
+    fy_trips = []  # placeholder to match unpack pattern
+    match_log = []  # placeholder
+
+    return fy_list, fy_days, residency, reasons, total, warns, None, fy_trips, match_log
+
 
 
 # === STREAMLIT UI ===
