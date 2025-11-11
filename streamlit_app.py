@@ -49,6 +49,26 @@ def smart_pair(arrs, deps):
     return pairs, matches
 
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False, income_15l=False, not_taxed_abroad=False, is_crew=False):
+    # --- parse employment FY selections into start-year ints robustly ---
+    emp_years = set()
+    for fy in (exc_fys or []):
+        if not fy:
+            continue
+        s = str(fy).strip()
+        # Accept formats like "2024-2025", "2024-25", "2024/25", or just "2024"
+        try:
+            if "-" in s:
+                start = s.split("-")[0]
+            elif "/" in s:
+                start = s.split("/")[0]
+            else:
+                start = s
+            start = start.strip()
+            emp_years.add(int(start))
+        except Exception:
+            # ignore malformed entries
+            continue
+
     arrs = parse_dates(arr_str)
     deps = parse_dates(dep_str)
     paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
@@ -57,6 +77,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
     warnings = []
     seen = set()
 
+    # collect day counts per fiscal-year string as before (e.g. "2024-2025")
     for i, (a, d) in enumerate(paired):
         if not a or not d:
             if a or d:
@@ -77,24 +98,37 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                 fy_trips[fy].append(trip_str)
             cur += timedelta(days=1)
 
-    years = {int(fy.split('-')[0]) for fy in fy_days} or {2024}
-    years_range = range(min(years), max(years) + 1)
+    # Build integer-start-year set from observed fy_days keys
+    years_from_data = set()
+    for fy in fy_days.keys():
+        try:
+            years_from_data.add(int(fy.split("-")[0]))
+        except:
+            continue
+
+    # Ensure years_range includes emp_years (so employment FYs take effect even if 0 days)
+    all_years = set(years_from_data) | set(emp_years)
+    if not all_years:
+        # fallback to a reasonable default if nothing present (keep your existing default behaviour)
+        all_years = {2024}
+    years_range = range(min(all_years), max(all_years) + 1)
+
+    # map integer-year -> days in that FY
     full_days = {y: fy_days.get(f"{y}-{y+1}", 0) for y in years_range}
     sorted_fy = [f"{y}-{y+1}" for y in years_range]
 
     residency, reasons = {}, {}
-    emp_years = {int(fy.split('-')[0]) for fy in exc_fys}
 
     for y in years_range:
         days = full_days.get(y, 0)
         emp = y in emp_years
-        
+
         # === RESIDENCY THRESHOLD ===
         threshold = 182
         if is_crew:
             threshold = 182  # Crew always 182
         elif emp:
-            threshold = 182  # Employment abroad
+            threshold = 182  # Employment abroad → 182 threshold
         elif is_visitor and income_15l:
             threshold = 120
         elif is_visitor or is_citizen:
@@ -104,7 +138,11 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
         prior4_days = sum(full_days.get(y - i, 0) for i in range(1, 5))
 
-        is_res = days >= 182 or (days >= threshold and prior4_days >= 365) if not income_15l else days >= threshold
+        # If >15L the special logic is simpler: use threshold only
+        if income_15l:
+            is_res = days >= threshold
+        else:
+            is_res = (days >= 182) or (days >= threshold and prior4_days >= 365)
 
         # === DEEMED RESIDENCY (1A) ===
         deemed = is_citizen and income_15l and not_taxed_abroad
