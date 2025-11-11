@@ -172,13 +172,24 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             residency[y] = ("Resident", days)
             reasons[y] = base
 
-        # === RNOR LOGIC ===
-        prior7 = [x for x in range(y-7, y) if x in full_days]
-        prior10 = [x for x in range(y-10, y) if x in full_days]
-        prev7_days = sum(full_days.get(x, 0) for x in prior7)
-        non_res10 = sum(1 for x in prior10 if residency.get(x, ("Non-Resident",0))[0] == "Non-Resident") + (10 - len(prior10))
-        rnor7 = len(prior7) >= 7 and prev7_days <= 729
-        rnor9 = non_res10 >= 9
+               # === RNOR LOGIC (apply only if we have sufficient prior data) ===
+        prior7 = [x for x in range(y - 7, y) if x in full_days]
+        prior10 = [x for x in range(y - 10, y) if x in full_days]
+
+        # Check if we have sufficient data (>=7 or >=10 prior FYs)
+        enough_data_7 = len(prior7) >= 7
+        enough_data_10 = len(prior10) >= 10
+
+        # Only compute RNOR if enough prior years exist
+        if enough_data_7 or enough_data_10:
+            prev7_days = sum(full_days.get(x, 0) for x in prior7)
+            non_res10 = sum(1 for x in prior10 if residency.get(x, ("Non-Resident", 0))[0] == "Non-Resident")
+            rnor7 = enough_data_7 and prev7_days <= 729
+            rnor9 = enough_data_10 and non_res10 >= 9
+        else:
+            rnor7 = rnor9 = False
+
+        # RNOR also if visitor with 120–181 days + >15L income, or deemed
         rnor_visitor = is_visitor and income_15l and 120 <= days < 182
         rnor_deemed = deemed
 
@@ -188,7 +199,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             parts = []
             if rnor9: parts.append("9/10 prior NR")
             if rnor7: parts.append("≤729 days in 7 FYs")
-            if rnor_visitor: parts.append("120-181 days + >15L visitor")
+            if rnor_visitor: parts.append("120–181 days + >15L visitor")
             if rnor_deemed: parts.append("Deemed resident")
             reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
