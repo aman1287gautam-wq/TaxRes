@@ -2,11 +2,10 @@ import streamlit as st
 from datetime import datetime, timedelta
 from collections import defaultdict
 import base64
-import io
-import streamlit.components.v1 as components   # <-- added
+import streamlit.components.v1 as components   # <-- needed for clipboard
 
 # -------------------------------------------------
-# (All helper functions – unchanged)
+# Helper functions (unchanged)
 # -------------------------------------------------
 def parse_dates(text: str):
     dates = []
@@ -44,20 +43,19 @@ def smart_pair(arrs, deps):
             used.add(j)
             days = (dep - arr).days + 1
             pairs.append((arr, dep))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → Departure {j+1} ({dep.strftime('%d/%m/%Y')}) • {days} days")
+            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) to Departure {j+1} ({dep.strftime('%d/%m/%Y')}) • {days} days")
         else:
             pairs.append((arr, None))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → NO DEPARTURE FOUND")
+            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) to NO DEPARTURE FOUND")
     for j, dep in enumerate(deps):
         if j not in used and dep:
             pairs.append((None, dep))
-            matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) → NO ARRIVAL")
+            matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) to NO ARRIVAL")
     return pairs, matches
 
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
                    income_15l=False, not_taxed_abroad=False, is_crew=False):
-    # (the full corrected calculate_stay from the previous answer – unchanged)
-    # -------------------------------------------------
+    # (full corrected calculate_stay – same as before)
     arrs = parse_dates(arr_str)
     deps = parse_dates(dep_str)
     paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
@@ -75,7 +73,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             warnings.append(f"Trip {i+1}: invalid (arrival > departure)")
             continue
         days_count = (d - a).days + 1
-        trip_str = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} → {d.strftime('%d/%m/%Y')} ({days_count} days)"
+        trip_str = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} to {d.strftime('%d/%m/%Y')} ({days_count} days)"
         cur = a
         while cur <= d:
             fy = fy_of(cur)
@@ -122,30 +120,30 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
         if deemed:
             residency[y] = ("Resident (Deemed u/s 6(1A))", days)
-            reasons[y] = "Citizen + Income >₹15L + Not taxed abroad → Deemed Resident"
+            reasons[y] = "Citizen + Income >Rs.15L + Not taxed abroad to Deemed Resident"
             is_res = True
         else:
             is_res = days >= 182 or (days >= threshold and prior4_days >= 365)
             if not is_res:
                 reason = f"<{threshold} days"
                 if days >= threshold:
-                    reason = f"≥{threshold} days but Prior 4 FYs {prior4_days} < 365"
+                    reason = f">={threshold} days but Prior 4 FYs {prior4_days} < 365"
                 residency[y] = ("Non-Resident", days)
                 reasons[y] = reason
                 continue
             else:
                 if days >= 182:
-                    base = "≥182 days"
+                    base = ">=182 days"
                 elif emp:
-                    base = "≥182 days (Employment abroad)"
+                    base = ">=182 days (Employment abroad)"
                 elif is_crew:
-                    base = "≥182 days (Crew)"
+                    base = ">=182 days (Crew)"
                 elif is_visitor and income_15l:
-                    base = "≥120 days (Visitor/PIO + >₹15L) + Prior ≥365"
+                    base = ">=120 days (Visitor/PIO + >Rs.15L) + Prior >=365"
                 elif is_visitor:
-                    base = "≥182 days (Visitor/PIO ≤₹15L) + Prior ≥365"
+                    base = ">=182 days (Visitor/PIO <=Rs.15L) + Prior >=365"
                 else:
-                    base = "≥60 days + Prior 4 FYs ≥365"
+                    base = ">=60 days + Prior 4 FYs >=365"
                 residency[y] = ("Resident", days)
                 reasons[y] = base
 
@@ -164,13 +162,13 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         if is_rnor:
             parts = []
             if rnor9: parts.append("9/10 prior FYs NR")
-            if rnor7: parts.append("≤729 days in prior 7 FYs")
-            if rnor_visitor: parts.append("120–181 days + >₹15L visitor")
+            if rnor7: parts.append("<=729 days in prior 7 FYs")
+            if rnor_visitor: parts.append("120–181 days + >Rs.15L visitor")
             if rnor_deemed: parts.append("Deemed resident")
-            reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
+            reason = f"{reasons[y]} to RNOR ({' | '.join(parts)})"
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
         else:
-            reason = f"{reasons[y]} → ROR"
+            reason = f"{reasons[y]} to ROR"
             residency[y] = ("Resident and Ordinarily Resident (ROR)", days)
         reasons[y] = reason
 
@@ -211,7 +209,7 @@ is_citizen = col_a.checkbox("Indian Citizen", value=True)
 is_visitor = col_b.checkbox("Visitor / PIO coming to India", value=False)
 
 col_c, col_d = st.columns(2)
-income_15l = col_c.checkbox("Indian Income (excl. foreign) > ₹15 Lakh", value=False)
+income_15l = col_c.checkbox("Indian Income (excl. foreign) > Rs.15 Lakh", value=False)
 not_taxed_abroad = col_d.checkbox("Not liable to tax in any foreign country", value=False,
                                   help="For Deemed Residency u/s 6(1A)")
 
@@ -305,32 +303,28 @@ if st.session_state.results:
     st.success(f"**Total Days in India: {r['total']}**")
 
     # -------------------------------------------------
-    # COPY-TO-CLIPBOARD (fixed)
+    # COPY-TO-CLIPBOARD (fixed, no indentation error)
     # -------------------------------------------------
     colc1, colc2 = st.columns(2)
-        with colc1:
+    with colc1:
         if st.button("Copy Table", use_container_width=True):
-            # Generate tab-separated text
             txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
                 f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
             )
             st.code(txt, language="text")
 
-            # === ESCAPE BACKTICKS FOR JS ===
+            # Escape back-ticks and quotes for JS
             txt_js = txt.replace("\\", "\\\\").replace("`", "\\`").replace('"', '\\"')
 
-            # === HIDDEN TEXTAREA + JS (NO F-STRING CONFLICT) ===
             html = f'''
             <textarea id="cliptext" style="position:absolute;left:-9999px;">{txt}</textarea>
             <script>
             (function(){{
                 const ta = document.getElementById('cliptext');
                 ta.select();
-                ta.setSelectionRange(0, 99999);
-                let success = false;
-                try {{ 
-                    success = document.execCommand('copy'); 
-                }} catch(e) {{}}
+                ta.setSelectionRange(0,99999);
+                let ok = false;
+                try{{ ok = document.execCommand('copy'); }}catch(e){}
                 navigator.clipboard.writeText("{txt_js}").then(
                     () => parent.postMessage({{type:'clip',ok:true}}, '*'),
                     () => parent.postMessage({{type:'clip',ok:false}}, '*')
@@ -340,7 +334,6 @@ if st.session_state.results:
             '''
             components.html(html, height=0, width=0)
 
-            # === MESSAGE LISTENER ===
             st.markdown(
                 """
                 <script>
@@ -356,15 +349,13 @@ if st.session_state.results:
                 unsafe_allow_html=True
             )
 
-            # === SHOW TOAST ===
             qp = st.query_params
             if "clip" in qp:
                 ok = qp["clip"] == "1"
-                st.toast("Copied to clipboard! Paste with Ctrl+V" if ok else "Copy failed – use Download", 
-                        icon="Success" if ok else "Warning")
+                st.toast("Copied to clipboard! Paste with Ctrl+V" if ok else "Copy failed – use Download",
+                         icon="Success" if ok else "Warning")
                 qp.pop("clip", None)
 
-            # === FALLBACK DOWNLOAD ===
             st.download_button(
                 "Download as TXT (fallback)",
                 data=txt,
@@ -372,7 +363,7 @@ if st.session_state.results:
                 mime="text/plain",
                 use_container_width=True
             )
-            
+
     with colc2:
         report = f"""FULL INDIA TAX RESIDENCY REPORT (SECTION 6)
 {'='*60}
