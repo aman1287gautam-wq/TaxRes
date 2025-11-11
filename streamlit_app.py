@@ -191,8 +191,8 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
 # === STREAMLIT UI (unchanged) ===
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
-st.title("🇮🇳 India Tax Residency Calculator (Section 6 - Full Rules)")
-st.markdown("**100% compliant with IT Act 1961** • 6(1A) Deemed • 120-day • RNOR(c)(d) • Crew • Smart Pairing")
+st.title("🇮🇳 India Tax Residency Calculator")
+st.markdown("**100% compliant with IT Act 1961** • By Aman Gautam, for queries: 8433878823")
 
 # Initialize session state
 for key in ["results", "selected_fy"]:
