@@ -181,7 +181,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
         else:
             reason = f"{reasons[y]} → ROR"
-            residency[y] = ("Resident and Ordinarily Resident (ROR)", days)
+            residency[y] = ("ROR", days)
         reasons[y] = reason
 
     total = sum(fy_days.values())
@@ -191,8 +191,8 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
 # === STREAMLIT UI (unchanged) ===
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
-st.title("🇮🇳 India Tax Residency Calculator (Section 6 - Full Rules)")
-st.markdown("**100% compliant with IT Act 1961** • 6(1A) Deemed • 120-day • RNOR(c)(d) • Crew • Smart Pairing")
+st.title("🇮🇳 India Tax Residency Calculator")
+st.markdown("**100% compliant with IT Act 1961** • 6(1A) Deemed • 120-day • RNOR(c)(d) • Crew • Smart Pairing; *By Aman Gautam (8433878823)*")
 
 # Initialize session state
 for key in ["results", "selected_fy"]:
@@ -317,12 +317,12 @@ if st.session_state.results:
 
     colc1, colc2 = st.columns(2)
     with colc1:
-        if st.button("📋 Copy Table", use_container_width=True):
+        if st.button("📋 Copy Table (hover on the table and click on copy to clipboard)", use_container_width=True):
             txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
                 f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
             )
             st.code(txt)
-            st.toast("Copied to clipboard!")
+            st.toast("hover on the table and click on copy to clipboard")
 
     with colc2:
         report = f"""FULL INDIA TAX RESIDENCY REPORT (SECTION 6)
