@@ -55,7 +55,7 @@ def smart_pair(arrs, deps):
     
     return pairs, matches
 
-# === MAIN RESIDENCY CALCULATION (CORRECTED) ===
+# === MAIN RESIDENCY CALCULATION ===
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
                    income_15l=False, not_taxed_abroad=False, is_crew=False):
     arrs = parse_dates(arr_str)
@@ -109,7 +109,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         days = full_days.get(y, 0)
         emp = y in emp_years
 
-        # CORRECTED THRESHOLD (DEFAULT 60, OVERRIDE ONLY FOR EXCEPTIONS)
+        # THRESHOLD
         threshold = 60
         if is_crew:
             threshold = 182
@@ -120,7 +120,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
         prior4_days = sum(full_days.get(y - i, 0) for i in range(1, 5))
 
-        # DEEMED RESIDENCY 6(1A) - ONLY FOR CITIZENS
+        # DEEMED RESIDENCY 6(1A)
         deemed = is_citizen and income_15l and not_taxed_abroad
 
         if days == 0 and not deemed:
@@ -142,7 +142,6 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                 reasons[y] = reason
                 continue
             else:
-                # CORRECTED REASONS FOR CLARITY
                 if days >= 182:
                     base = "≥182 days"
                 elif emp:
@@ -158,7 +157,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                 residency[y] = ("Resident", days)
                 reasons[y] = base
 
-        # RNOR LOGIC (unchanged, as correct)
+        # RNOR LOGIC
         prior7_years = [x for x in range(y-7, y) if x in full_days]
         rnor7 = len(prior7_years) >= 7 and sum(full_days.get(x, 0) for x in prior7_years) <= 729
 
@@ -181,7 +180,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
         else:
             reason = f"{reasons[y]} → ROR"
-            residency[y] = ("ROR", days)
+            residency[y] = ("Resident and Ordinarily Resident (ROR)", days)
         reasons[y] = reason
 
     total = sum(fy_days.values())
@@ -189,10 +188,10 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
     return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log
 
-# === STREAMLIT UI (unchanged) ===
+# === STREAMLIT UI ===
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
-st.title("🇮🇳 India Tax Residency Calculator")
-st.markdown("**100% compliant with IT Act 1961** • By Aman Gautam, for queries: 8433878823")
+st.title("🇮🇳 India Tax Residency Calculator (Section 6 - Full Rules)")
+st.markdown("**100% compliant with IT Act 1961** • 6(1A) Deemed • 120-day • RNOR(c)(d) • Crew • Smart Pairing")
 
 # Initialize session state
 for key in ["results", "selected_fy"]:
@@ -269,7 +268,7 @@ if calculate:
             except Exception as e:
                 st.error(f"Calculation error: {e}")
 
-# DISPLAY RESULTS (unchanged)
+# DISPLAY RESULTS
 if st.session_state.results:
     r = st.session_state.results
     
@@ -315,14 +314,21 @@ if st.session_state.results:
 
     st.success(f"**Total Days in India: {r['total']}**")
 
+    # FIXED COPY/EXPORT SECTION
+    txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
+        f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
+    )
+
     colc1, colc2 = st.columns(2)
     with colc1:
-        if st.button("📋 Copy Table", use_container_width=True):
-            txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
-                f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
-            )
-            st.code(txt)
-            st.toast("Copied to clipboard!")
+        if st.download_button(
+            label="📋 Copy Table (as TSV)",
+            data=txt,
+            file_name="residency_table.tsv",
+            mime="text/tab-separated-values",
+            use_container_width=True
+        ):
+            st.toast("Table ready for copy! (Open the download and paste)")
 
     with colc2:
         report = f"""FULL INDIA TAX RESIDENCY REPORT (SECTION 6)
@@ -343,7 +349,7 @@ Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
         report += "100% compliant with Section 6, Finance Act 2020–2025"
 
         b64 = base64.b64encode(report.encode()).decode()
-        href = f'<a href="data:file/txt;base64,{b64}" download="Tax_Residency_Report_{datetime.now().strftime("%Y%m%d")}.txt">📥 Download Report</a>'
+        href = f'<a href="data:file/txt;base64,{b64}" download="Tax_Residency_Report_{datetime.now().strftime("%Y%m%d")}.txt">📥 Download Full Report</a>'
         st.markdown(href, unsafe_allow_html=True)
 
 else:
