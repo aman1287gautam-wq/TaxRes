@@ -7,7 +7,7 @@ import pandas as pd
 import io
 
 # -------------------------------------------------
-# Helper Functions
+# Helper Functions (unchanged)
 # -------------------------------------------------
 def parse_dates(text: str):
     dates = []
@@ -45,14 +45,14 @@ def smart_pair(arrs, deps):
             used.add(j)
             days = (dep - arr).days + 1
             pairs.append((arr, dep))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → Departure {j+1} ({dep.strftime('%d/%m/%Y')}) • {days} days")
+            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) to Departure {j+1} ({dep.strftime('%d/%m/%Y')}) • {days} days")
         else:
             pairs.append((arr, None))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → NO DEPARTURE FOUND")
+            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) to NO DEPARTURE FOUND")
     for j, dep in enumerate(deps):
         if j not in used and dep:
             pairs.append((None, dep))
-            matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) → NO ARRIVAL")
+            matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) to NO ARRIVAL")
     return pairs, matches
 
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
@@ -74,7 +74,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             warnings.append(f"Trip {i+1}: invalid (arrival > departure)")
             continue
         days_count = (d - a).days + 1
-        trip_str = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} → {d.strftime('%d/%m/%Y')} ({days_count} days)"
+        trip_str = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} to {d.strftime('%d/%m/%Y')} ({days_count} days)"
         cur = a
         while cur <= d:
             fy = fy_of(cur)
@@ -118,30 +118,30 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
         if deemed:
             residency[y] = ("Resident (Deemed u/s 6(1A))", days)
-            reasons[y] = "Citizen + Income >₹15L + Not taxed abroad → Deemed Resident"
+            reasons[y] = "Citizen + Income >Rs.15L + Not taxed abroad to Deemed Resident"
             is_res = True
         else:
             is_res = days >= 182 or (days >= threshold and prior4_days >= 365)
             if not is_res:
                 reason = f"<{threshold} days"
                 if days >= threshold:
-                    reason = f"≥{threshold} days but Prior 4 FYs {prior4_days} < 365"
+                    reason = f">={threshold} days but Prior 4 FYs {prior4_days} < 365"
                 residency[y] = ("Non-Resident", days)
                 reasons[y] = reason
                 continue
             else:
                 if days >= 182:
-                    base = "≥182 days"
+                    base = ">=182 days"
                 elif emp:
-                    base = "≥182 days (Employment abroad)"
+                    base = ">=182 days (Employment abroad)"
                 elif is_crew:
-                    base = "≥182 days (Crew)"
+                    base = ">=182 days (Crew)"
                 elif is_visitor and income_15l:
-                    base = "≥120 days (Visitor/PIO + >₹15L) + Prior ≥365"
+                    base = ">=120 days (Visitor/PIO + >Rs.15L) + Prior >=365"
                 elif is_visitor:
-                    base = "≥182 days (Visitor/PIO ≤₹15L) + Prior ≥365"
+                    base = ">=182 days (Visitor/PIO <=Rs.15L) + Prior >=365"
                 else:
-                    base = "≥60 days + Prior 4 FYs ≥365"
+                    base = ">=60 days + Prior 4 FYs >=365"
                 residency[y] = ("Resident", days)
                 reasons[y] = base
 
@@ -157,13 +157,13 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         if is_rnor:
             parts = []
             if rnor9: parts.append("9/10 prior FYs NR")
-            if rnor7: parts.append("≤729 days in prior 7 FYs")
-            if rnor_visitor: parts.append("120–181 days + >₹15L visitor")
+            if rnor7: parts.append("<=729 days in prior 7 FYs")
+            if rnor_visitor: parts.append("120–181 days + >Rs.15L visitor")
             if rnor_deemed: parts.append("Deemed resident")
-            reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
+            reason = f"{reasons[y]} to RNOR ({' | '.join(parts)})"
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
         else:
-            reason = f"{reasons[y]} → ROR"
+            reason = f"{reasons[y]} to ROR"
             residency[y] = ("Resident and Ordinarily Resident (ROR)", days)
         reasons[y] = reason
 
@@ -172,7 +172,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
     return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log
 
 # -------------------------------------------------
-# Streamlit UI
+# UI
 # -------------------------------------------------
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
 st.title("India Tax Residency Calculator (Section 6 - Full Rules)")
@@ -196,7 +196,7 @@ is_citizen = col_a.checkbox("Indian Citizen", value=True)
 is_visitor = col_b.checkbox("Visitor / PIO coming to India", value=False)
 
 col_c, col_d = st.columns(2)
-income_15l = col_c.checkbox("Indian Income (excl. foreign) > ₹15 Lakh", value=False)
+income_15l = col_c.checkbox("Indian Income (excl. foreign) > Rs.15 Lakh", value=False)
 not_taxed_abroad = col_d.checkbox("Not liable to tax in any foreign country", value=False, help="For Deemed Residency u/s 6(1A)")
 
 is_crew = st.checkbox("Crew member of Indian/foreign ship", value=False)
@@ -333,24 +333,18 @@ if st.session_state.results:
             )
 
     with colc2:
-        # === EXPORT TO EXCEL (using xlsxwriter - pre-installed) ===
+        # === EXPORT TO EXCEL (using openpyxl via to_excel) ===
         df_excel = pd.DataFrame(data)
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_excel.to_excel(writer, index=False, sheet_name='Residency')
-            worksheet = writer.sheets['Residency']
-            for i, col in enumerate(df_excel.columns):
-                max_len = max(df_excel[col].astype(str).map(len).max(), len(col)) + 2
-                worksheet.set_column(i, i, max_len)
+        df_excel.to_excel(output, index=False, engine='openpyxl')
         output.seek(0)
-        b64_excel = base64.b64encode(output.read()).decode()
-        href_excel = f'''
-        <a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64_excel}"
-           download="Tax_Residency_Report_{datetime.now().strftime('%Y%m%d')}.xlsx">
-           Export to Excel
-        </a>
-        '''
-        st.markdown(href_excel, unsafe_allow_html=True)
+        st.download_button(
+            label="Export to Excel",
+            data=output,
+            file_name=f"Tax_Residency_Report_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
         # === FULL REPORT (TXT) ===
         report = f"""FULL INDIA TAX RESIDENCY REPORT (SECTION 6)
@@ -368,9 +362,13 @@ Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
         report += "Calculator by: Aman Gautam (8433878823)\n"
         report += "100% compliant with Section 6, Finance Act 2020–2025"
 
-        b64_txt = base64.b64encode(report.encode()).decode()
-        href_txt = f'<a href="data:file/txt;base64,{b64_txt}" download="Tax_Residency_Report_{datetime.now().strftime("%Y%m%d")}.txt">Download Full Report (TXT)</a>'
-        st.markdown(href_txt, unsafe_allow_html=True)
+        st.download_button(
+            label="Download Full Report (TXT)",
+            data=report,
+            file_name=f"Tax_Residency_Report_{datetime.now().strftime('%Y%m%d')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
 
 else:
     st.info("Enter arrival/departure dates and click **Calculate** to begin.")
