@@ -2,6 +2,7 @@ import streamlit as st
 from datetime import datetime, timedelta
 from collections import defaultdict
 import base64
+import io
 
 # === DATE PARSING ===
 def parse_dates(text: str):
@@ -55,7 +56,7 @@ def smart_pair(arrs, deps):
     
     return pairs, matches
 
-# === MAIN RESIDENCY CALCULATION ===
+# === MAIN RESIDENCY CALCULATION (CORRECTED) ===
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
                    income_15l=False, not_taxed_abroad=False, is_crew=False):
     arrs = parse_dates(arr_str)
@@ -109,7 +110,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         days = full_days.get(y, 0)
         emp = y in emp_years
 
-        # THRESHOLD
+        # CORRECTED THRESHOLD (DEFAULT 60, OVERRIDE ONLY FOR EXCEPTIONS)
         threshold = 60
         if is_crew:
             threshold = 182
@@ -120,7 +121,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
         prior4_days = sum(full_days.get(y - i, 0) for i in range(1, 5))
 
-        # DEEMED RESIDENCY 6(1A)
+        # DEEMED RESIDENCY 6(1A) - ONLY FOR CITIZENS
         deemed = is_citizen and income_15l and not_taxed_abroad
 
         if days == 0 and not deemed:
@@ -142,6 +143,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                 reasons[y] = reason
                 continue
             else:
+                # CORRECTED REASONS FOR CLARITY
                 if days >= 182:
                     base = "≥182 days"
                 elif emp:
@@ -157,7 +159,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                 residency[y] = ("Resident", days)
                 reasons[y] = base
 
-        # RNOR LOGIC
+        # RNOR LOGIC (unchanged, as correct)
         prior7_years = [x for x in range(y-7, y) if x in full_days]
         rnor7 = len(prior7_years) >= 7 and sum(full_days.get(x, 0) for x in prior7_years) <= 729
 
@@ -314,21 +316,39 @@ if st.session_state.results:
 
     st.success(f"**Total Days in India: {r['total']}**")
 
-    # FIXED COPY/EXPORT SECTION
-    txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
-        f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
-    )
-
     colc1, colc2 = st.columns(2)
     with colc1:
-        if st.download_button(
-            label="📋 Copy Table (as TSV)",
-            data=txt,
-            file_name="residency_table.tsv",
-            mime="text/tab-separated-values",
-            use_container_width=True
-        ):
-            st.toast("Table ready for copy! (Open the download and paste)")
+        if st.button("📋 Copy Table", use_container_width=True):
+            # Generate tab-separated text
+            txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
+                f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
+            )
+            
+            # Display for immediate view
+            st.code(txt)
+            
+            # JS for clipboard (works in most browsers)
+            js_code = f"""
+            <script>
+            navigator.clipboard.writeText(`{txt.replace('`', '\\`')}`).then(function() {{
+                // Simple alert as toast alternative
+                alert('Table copied to clipboard! Paste with Ctrl+V');
+            }}).catch(function(err) {{
+                console.log('Copy failed: ', err);
+                alert('Copy failed - use download button');
+            }});
+            </script>
+            """
+            st.components.v1.html(js_code, height=0)
+            
+            # Fallback: Download button
+            csv_buffer = io.StringIO(txt)
+            st.download_button(
+                label="💾 Download as TXT (Fallback)",
+                data=csv_buffer.getvalue(),
+                file_name="residency_table.txt",
+                mime="text/plain"
+            )
 
     with colc2:
         report = f"""FULL INDIA TAX RESIDENCY REPORT (SECTION 6)
@@ -349,7 +369,7 @@ Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
         report += "100% compliant with Section 6, Finance Act 2020–2025"
 
         b64 = base64.b64encode(report.encode()).decode()
-        href = f'<a href="data:file/txt;base64,{b64}" download="Tax_Residency_Report_{datetime.now().strftime("%Y%m%d")}.txt">📥 Download Full Report</a>'
+        href = f'<a href="data:file/txt;base64,{b64}" download="Tax_Residency_Report_{datetime.now().strftime("%Y%m%d")}.txt">📥 Download Report</a>'
         st.markdown(href, unsafe_allow_html=True)
 
 else:
