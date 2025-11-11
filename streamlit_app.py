@@ -14,7 +14,7 @@ def parse_dates(text: str):
         if not s or s.upper() == "-N/A-":
             dates.append(None)
             continue
-        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y"):
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m/%y"):
             try:
                 parsed = datetime.strptime(s, fmt).date()
                 dates.append(parsed)
@@ -31,6 +31,7 @@ def fy_of(date):
 def smart_pair(arrs, deps):
     if len(arrs) != len(deps):
         return list(zip(arrs, deps)), []
+    
     pairs, used, matches = [], set(), []
     for i, arr in enumerate(arrs):
         if not arr:
@@ -43,22 +44,25 @@ def smart_pair(arrs, deps):
             used.add(j)
             days = (dep - arr).days + 1
             pairs.append((arr, dep))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) to Departure {j+1} ({dep.strftime('%d/%m/%Y')}) • {days} days")
+            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → Departure {j+1} ({dep.strftime('%d/%m/%Y')}) • {days} days")
         else:
             pairs.append((arr, None))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) to NO DEPARTURE FOUND")
+            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → NO DEPARTURE FOUND")
+    
     for j, dep in enumerate(deps):
         if j not in used and dep:
             pairs.append((None, dep))
-            matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) to NO ARRIVAL")
+            matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) → NO ARRIVAL")
+    
     return pairs, matches
 
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
                    income_15l=False, not_taxed_abroad=False, is_crew=False):
-    # (full corrected calculate_stay – same as before)
     arrs = parse_dates(arr_str)
     deps = parse_dates(dep_str)
+
     paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
+
     fy_days = defaultdict(int)
     fy_trips = defaultdict(list)
     warnings = []
@@ -72,8 +76,10 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         if a > d:
             warnings.append(f"Trip {i+1}: invalid (arrival > departure)")
             continue
+
         days_count = (d - a).days + 1
-        trip_str = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} to {d.strftime('%d/%m/%Y')} ({days_count} days)"
+        trip_str = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} → {d.strftime('%d/%m/%Y')} ({days_count} days)"
+
         cur = a
         while cur <= d:
             fy = fy_of(cur)
@@ -84,6 +90,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             fy_trips[fy].append(trip_str)
             cur += timedelta(days=1)
 
+    # Determine FY range from actual data
     years_with_data = {int(fy.split('-')[0]) for fy in fy_days}
     if not years_with_data:
         years_with_data = {datetime.now().year - 1}
@@ -94,6 +101,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
     full_days = {y: fy_days.get(f"{y}-{y+1}", 0) for y in years_range}
     sorted_fy = [f"{y}-{y+1}" for y in years_range]
 
+    # Employment FYs: only from existing FYs
     emp_years = {int(fy.split('-')[0]) for fy in exc_fys if fy in sorted_fy}
 
     residency, reasons = {}, {}
@@ -101,6 +109,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         days = full_days.get(y, 0)
         emp = y in emp_years
 
+        # CORRECTED THRESHOLD (DEFAULT 60, OVERRIDE ONLY FOR EXCEPTIONS)
         threshold = 60
         if is_crew:
             threshold = 182
@@ -111,6 +120,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
         prior4_days = sum(full_days.get(y - i, 0) for i in range(1, 5))
 
+        # DEEMED RESIDENCY 6(1A) - ONLY FOR CITIZENS
         deemed = is_citizen and income_15l and not_taxed_abroad
 
         if days == 0 and not deemed:
@@ -120,33 +130,35 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
 
         if deemed:
             residency[y] = ("Resident (Deemed u/s 6(1A))", days)
-            reasons[y] = "Citizen + Income >Rs.15L + Not taxed abroad to Deemed Resident"
+            reasons[y] = "Citizen + Income >₹15L + Not taxed abroad → Deemed Resident"
             is_res = True
         else:
             is_res = days >= 182 or (days >= threshold and prior4_days >= 365)
             if not is_res:
                 reason = f"<{threshold} days"
                 if days >= threshold:
-                    reason = f">={threshold} days but Prior 4 FYs {prior4_days} < 365"
+                    reason = f"≥{threshold} days but Prior 4 FYs {prior4_days} < 365"
                 residency[y] = ("Non-Resident", days)
                 reasons[y] = reason
                 continue
             else:
+                # CORRECTED REASONS FOR CLARITY
                 if days >= 182:
-                    base = ">=182 days"
+                    base = "≥182 days"
                 elif emp:
-                    base = ">=182 days (Employment abroad)"
+                    base = "≥182 days (Employment abroad)"
                 elif is_crew:
-                    base = ">=182 days (Crew)"
+                    base = "≥182 days (Crew)"
                 elif is_visitor and income_15l:
-                    base = ">=120 days (Visitor/PIO + >Rs.15L) + Prior >=365"
+                    base = "≥120 days (Visitor/PIO + >₹15L) + Prior ≥365"
                 elif is_visitor:
-                    base = ">=182 days (Visitor/PIO <=Rs.15L) + Prior >=365"
+                    base = "≥182 days (Visitor/PIO ≤₹15L) + Prior ≥365"
                 else:
-                    base = ">=60 days + Prior 4 FYs >=365"
+                    base = "≥60 days + Prior 4 FYs ≥365"
                 residency[y] = ("Resident", days)
                 reasons[y] = base
 
+        # RNOR LOGIC (unchanged, as correct)
         prior7_years = [x for x in range(y-7, y) if x in full_days]
         rnor7 = len(prior7_years) >= 7 and sum(full_days.get(x, 0) for x in prior7_years) <= 729
 
@@ -162,27 +174,27 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         if is_rnor:
             parts = []
             if rnor9: parts.append("9/10 prior FYs NR")
-            if rnor7: parts.append("<=729 days in prior 7 FYs")
-            if rnor_visitor: parts.append("120–181 days + >Rs.15L visitor")
+            if rnor7: parts.append("≤729 days in prior 7 FYs")
+            if rnor_visitor: parts.append("120–181 days + >₹15L visitor")
             if rnor_deemed: parts.append("Deemed resident")
-            reason = f"{reasons[y]} to RNOR ({' | '.join(parts)})"
+            reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
         else:
-            reason = f"{reasons[y]} to ROR"
+            reason = f"{reasons[y]} → ROR"
             residency[y] = ("Resident and Ordinarily Resident (ROR)", days)
         reasons[y] = reason
 
     total = sum(fy_days.values())
     warn_msg = "\n".join(warnings) if warnings else ""
+
     return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log
 
-# -------------------------------------------------
-# UI
-# -------------------------------------------------
-st.set_page_config(page_title="India Tax Residency – Full Sec 6", layout="wide")
-st.title("India Tax Residency Calculator (Section 6 – Full Rules)")
+# === STREAMLIT UI ===
+st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
+st.title("🇮🇳 India Tax Residency Calculator (Section 6 - Full Rules)")
 st.markdown("**100% compliant with IT Act 1961** • 6(1A) Deemed • 120-day • RNOR(c)(d) • Crew • Smart Pairing")
 
+# Initialize session state
 for key in ["results", "selected_fy"]:
     if key not in st.session_state:
         st.session_state[key] = None
@@ -190,18 +202,19 @@ for key in ["results", "selected_fy"]:
 col1, col2 = st.columns(2)
 with col1:
     arr = st.text_area(
-        "Arrival Dates (space-separated)", height=220,
+        "Arrival Dates (space-separated)", 
+        height=220, 
         placeholder="01/04/2024 15/07/2024 10/01/2025",
         help="Supported: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY"
     )
 with col2:
     dep = st.text_area(
-        "Departure Dates (space-separated)", height=220,
+        "Departure Dates (space-separated)", 
+        height=220, 
         placeholder="10/06/2024 20/08/2024 25/01/2025"
     )
 
-smart = st.checkbox("Enable Smart Pairing (recommended)", value=True,
-                    help="Auto-matches earliest valid departure")
+smart = st.checkbox("Enable Smart Pairing (recommended)", value=True, help="Auto-matches earliest valid departure")
 
 st.subheader("Taxpayer Profile")
 col_a, col_b = st.columns(2)
@@ -209,22 +222,24 @@ is_citizen = col_a.checkbox("Indian Citizen", value=True)
 is_visitor = col_b.checkbox("Visitor / PIO coming to India", value=False)
 
 col_c, col_d = st.columns(2)
-income_15l = col_c.checkbox("Indian Income (excl. foreign) > Rs.15 Lakh", value=False)
+income_15l = col_c.checkbox("Indian Income (excl. foreign) > ₹15 Lakh", value=False)
 not_taxed_abroad = col_d.checkbox("Not liable to tax in any foreign country", value=False,
                                   help="For Deemed Residency u/s 6(1A)")
 
 is_crew = st.checkbox("Crew member of Indian/foreign ship", value=False)
 
 col_btn1, col_btn2 = st.columns(2)
-calculate = col_btn1.button("Calculate Full Residency", type="primary", use_container_width=True)
-clear = col_btn2.button("Clear All", use_container_width=True)
+calculate = col_btn1.button("🚀 Calculate Full Residency", type="primary", use_container_width=True)
+clear = col_btn2.button("🗑️ Clear All", use_container_width=True)
 
 if clear:
     st.session_state.results = None
     st.session_state.selected_fy = None
     st.rerun()
 
+# Employment FYs after calculation
 fy_options = st.session_state.results["fy_list"] if st.session_state.results else []
+
 emp_fys = st.multiselect(
     "Employment Abroad FYs (182-day rule applies)",
     options=fy_options,
@@ -254,18 +269,16 @@ if calculate:
             except Exception as e:
                 st.error(f"Calculation error: {e}")
 
-# -------------------------------------------------
 # DISPLAY RESULTS
-# -------------------------------------------------
 if st.session_state.results:
     r = st.session_state.results
-
+    
     if smart and r["match_log"]:
         with st.expander("Smart Pairing Matches", expanded=False):
             st.code("\n".join(r["match_log"][:30]), language="text")
-
+    
     if r["warns"]:
-        st.warning(f"{r['warns']}")
+        st.warning(f"⚠️ {r['warns']}")
 
     data = []
     for fy in r["fy_list"]:
@@ -302,34 +315,34 @@ if st.session_state.results:
 
     st.success(f"**Total Days in India: {r['total']}**")
 
-    # -------------------------------------------------
-    # COPY-TO-CLIPBOARD (fixed, no indentation error)
-    # -------------------------------------------------
     colc1, colc2 = st.columns(2)
     with colc1:
-        if st.button("Copy Table", use_container_width=True):
+        if st.button("📋 Copy Table", use_container_width=True):
             txt = "FY\tDays\tStatus\tReason\n" + "\n".join(
                 f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}" for d in data
             )
             st.code(txt, language="text")
 
-            # Escape back-ticks and quotes for JS
-            txt_js = txt.replace("\\", "\\\\").replace("`", "\\`").replace('"', '\\"')
+            # Escape backticks and quotes for JS
+            txt_js = txt.replace('\\', '\\\\').replace('`', '\\`').replace('"', '\\"')
 
+            # FIXED JS - Double braces for literal { } in f-string
             html = f'''
             <textarea id="cliptext" style="position:absolute;left:-9999px;">{txt}</textarea>
             <script>
-            (function(){{
+            (function() {{
                 const ta = document.getElementById('cliptext');
                 ta.select();
-                ta.setSelectionRange(0,99999);
+                ta.setSelectionRange(0, 99999);
                 let ok = false;
-                try{{ ok = document.execCommand('copy'); }}catch(e){}
+                try {{
+                    ok = document.execCommand('copy');
+                }} catch(e) {{}}
                 navigator.clipboard.writeText("{txt_js}").then(
                     () => parent.postMessage({{type:'clip',ok:true}}, '*'),
                     () => parent.postMessage({{type:'clip',ok:false}}, '*')
                 );
-            }})();
+            }})(); 
             </script>
             '''
             components.html(html, height=0, width=0)
@@ -352,12 +365,12 @@ if st.session_state.results:
             qp = st.query_params
             if "clip" in qp:
                 ok = qp["clip"] == "1"
-                st.toast("Copied to clipboard! Paste with Ctrl+V" if ok else "Copy failed – use Download",
-                         icon="Success" if ok else "Warning")
+                st.toast("Copied to clipboard! Paste with Ctrl+V" if ok else "Copy failed – use Download", 
+                         icon="✅" if ok else "⚠️")
                 qp.pop("clip", None)
 
             st.download_button(
-                "Download as TXT (fallback)",
+                "💾 Download TXT (fallback)",
                 data=txt,
                 file_name="residency_table.txt",
                 mime="text/plain",
@@ -373,22 +386,24 @@ Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
 """
         if r["match_log"]:
             report += "SMART PAIRING LOG:\n" + "\n".join(r["match_log"]) + "\n\n"
+        
         report += "FY\tDays\tStatus\tReason\n"
         for d in data:
             report += f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}\n"
+        
         report += f"\nTOTAL DAYS IN INDIA: {r['total']}\n"
         report += "Calculator by: Aman Gautam (8433878823)\n"
         report += "100% compliant with Section 6, Finance Act 2020–2025"
 
         b64 = base64.b64encode(report.encode()).decode()
-        href = f'<a href="data:file/txt;base64,{b64}" download="Tax_Residency_Report_{datetime.now().strftime("%Y%m%d")}.txt">Download Report</a>'
+        href = f'<a href="data:file/txt;base64,{b64}" download="Tax_Residency_Report_{datetime.now().strftime("%Y%m%d")}.txt">📥 Download Report</a>'
         st.markdown(href, unsafe_allow_html=True)
 
 else:
-    st.info("Enter arrival/departure dates and click **Calculate** to begin.")
+    st.info("👈 Enter arrival/departure dates and click **Calculate** to begin.")
 
 st.markdown("---")
 st.caption(
     "**Section 6(1), 6(1A), 6(6) compliant** • Includes RNOR(c), RNOR(d) • Crew • Employment abroad • "
-    "Made with love by **Aman Gautam**"
+    "Made with ❤️ by **Aman Gautam**"
 )
