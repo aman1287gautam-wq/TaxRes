@@ -224,8 +224,8 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
         else:
-            reason = f"{reasons[y]} → Resident Ordinarily Resident (ROR)"
-            residency[y] = ("Resident Ordinarily Resident (ROR)", days)
+            reason = f"{reasons[y]} → ROR"
+            residency[y] = ("ROR", days)
         reasons[y] = reason
     total = sum(fy_days.values())
     warn_msg = "\n".join(warnings) if warnings else ""
