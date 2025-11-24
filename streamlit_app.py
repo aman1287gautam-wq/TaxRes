@@ -2,6 +2,7 @@ import streamlit as st
 from datetime import datetime, timedelta
 from collections import defaultdict
 import base64
+import re
 # === PASSWORD CONFIG ===
 APP_PASSWORD = "faiu2"          # Change this to your desired password
 SESSION_AUTH_KEY = "auth_status"
@@ -66,21 +67,26 @@ authenticate()
 # === DATE PARSING ===
 def parse_dates(text: str):
     dates = []
+    invalids = []
     for s in text.split():
         s = s.strip()
         if not s or s.upper() == "-N/A-":
             dates.append(None)
+            invalids.append(s if s else "empty")
             continue
+        parsed = None
         for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y"):
             try:
                 parsed = datetime.strptime(s, fmt).date()
-                dates.append(parsed)
                 break
             except:
                 continue
+        if parsed:
+            dates.append(parsed)
         else:
             dates.append(None)
-    return dates
+            invalids.append(s)
+    return dates, invalids
 # === FY HELPER ===
 def fy_of(date):
     return f"{date.year}-{date.year + 1}" if date.month >= 4 else f"{date.year - 1}-{date.year}"
@@ -115,8 +121,8 @@ def smart_pair(arrs, deps):
 # === MAIN RESIDENCY CALCULATION (CORRECTED) ===
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
                    income_15l=False, not_taxed_abroad=False, is_crew=False):
-    arrs = parse_dates(arr_str)
-    deps = parse_dates(dep_str)
+    arrs, arr_invalids = parse_dates(arr_str)
+    deps, dep_invalids = parse_dates(dep_str)
     paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
     fy_days = defaultdict(int)
     fy_trips = defaultdict(list)
@@ -218,12 +224,50 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
         else:
-            reason = f"{reasons[y]} → ROR"
-            residency[y] = ("ROR", days)
+            reason = f"{reasons[y]} → Resident Ordinarily Resident (ROR)"
+            residency[y] = ("Resident Ordinarily Resident (ROR)", days)
         reasons[y] = reason
     total = sum(fy_days.values())
     warn_msg = "\n".join(warnings) if warnings else ""
-    return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log
+    
+    # Collect incomplete details
+    incompletes = []
+    for inv in arr_invalids:
+        incompletes.append(f"Invalid Arrival Date: {inv} (No FY - invalid format)")
+    for inv in dep_invalids:
+        incompletes.append(f"Invalid Departure Date: {inv} (No FY - invalid format)")
+    
+    if match_log:
+        for log in match_log:
+            if "NO DEPARTURE FOUND" in log:
+                date_match = re.search(r'\((\d{2}/\d{2}/\d{4})\)', log)
+                if date_match:
+                    date_str = date_match.group(1)
+                    try:
+                        date = datetime.strptime(date_str, '%d/%m/%Y').date()
+                        fy = fy_of(date)
+                        incompletes.append(f"Unpaired Arrival on {date_str} (FY {fy}) - No departure found")
+                    except:
+                        incompletes.append(f"Unpaired Arrival (date parse error: {date_str}) - No departure found")
+            elif "NO ARRIVAL" in log:
+                date_match = re.search(r'\((\d{2}/\d{2}/\d{4})\)', log)
+                if date_match:
+                    date_str = date_match.group(1)
+                    try:
+                        date = datetime.strptime(date_str, '%d/%m/%Y').date()
+                        fy = fy_of(date)
+                        incompletes.append(f"Unpaired Departure on {date_str} (FY {fy}) - No arrival found")
+                    except:
+                        incompletes.append(f"Unpaired Departure (date parse error: {date_str}) - No arrival found")
+    
+    if warnings:
+        for warn in warnings:
+            if "skipped (missing pair)" in warn:
+                incompletes.append(f"Trip incomplete: {warn} (Follow up for missing date)")
+            elif "invalid (arrival > departure)" in warn:
+                incompletes.append(f"Trip invalid: {warn} (Correct dates needed)")
+    
+    return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log, incompletes
 # === STREAMLIT UI ===
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
 st.title("India Tax Residency Calculator")
@@ -262,12 +306,13 @@ if calculate:
     else:
         with st.spinner("Applying Section 6 rules..."):
             try:
-                fy_list, fy_days, residency, reasons, total, warns, _, fy_trips, match_log = calculate_stay(
+                fy_list, fy_days, residency, reasons, total, warns, _, fy_trips, match_log, incompletes = calculate_stay(
                     arr, dep, emp_fys, smart, is_citizen, is_visitor, income_15l, not_taxed_abroad, is_crew
                 )
                 st.session_state.results = {
                     "fy_list": fy_list, "residency": residency, "reasons": reasons,
-                    "total": total, "warns": warns, "fy_trips": fy_trips, "match_log": match_log
+                    "total": total, "warns": warns, "fy_trips": fy_trips, "match_log": match_log,
+                    "incompletes": incompletes
                 }
                 st.session_state.selected_fy = None
                 st.rerun()
@@ -283,6 +328,12 @@ if st.session_state.results:
    
     if r["warns"]:
         st.warning(f"Warning: {r['warns']}")
+    
+    if r["incompletes"]:
+        with st.expander("Incomplete Details - Follow up with Assessee", expanded=True):
+            for inc in r["incompletes"]:
+                st.write(f"• {inc}")
+    
     data = []
     for fy in r["fy_list"]:
         y = int(fy.split('-')[0])
@@ -323,6 +374,12 @@ Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
 """
         if r["match_log"]:
             report += "SMART PAIRING LOG:\n" + "\n".join(r["match_log"]) + "\n\n"
+        
+        if r["incompletes"]:
+            report += "INCOMPLETE DETAILS (FOLLOW UP WITH ASSESSEE):\n"
+            for inc in r["incompletes"]:
+                report += f"- {inc}\n"
+            report += "\n"
        
         report += "FY\tDays\tStatus\tReason\n"
         for d in data:
