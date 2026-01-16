@@ -296,7 +296,7 @@ if clear:
     st.session_state.selected_fy = None
     st.rerun()
 fy_options = st.session_state.results["fy_list"] if st.session_state.results else []
-emp_fys = st.multiselect("Employment Abroad FYs (182-day rule applies)", options=fy_options,
+emp_fys = st.multiselect("Employment Abroad FYs (182-day rule applies) The employment exception under Section 6 applies only in the year of departure from India for employment and not in subsequent assessment years.", options=fy_options,
                          help="Select FYs where the person was employed outside India")
 if calculate:
     if not arr.strip() or not dep.strip():
