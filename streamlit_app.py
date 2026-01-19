@@ -8,59 +8,59 @@ import re
 # SESSION_AUTH_KEY = "auth_status"
 # # === AUTHENTICATION ===
 # def authenticate():
-#     if SESSION_AUTH_KEY not in st.session_state:
-#         st.session_state[SESSION_AUTH_KEY] = False
-#     if not st.session_state[SESSION_AUTH_KEY]:
-#         st.markdown(
-#             """
-#             <style>
-#             .lock-box {
-#                 text-align: center;
-#                 margin-top: 120px;
-#                 font-family: 'Segoe UI', sans-serif;
-#             }
-#             .lock-icon {
-#                 font-size: 70px;
-#                 color: #e74c3c;
-#             }
-#             .title {
-#                 font-size: 32px;
-#                 font-weight: bold;
-#                 margin: 15px 0;
-#                 color: #2c3e50;
-#             }
-#             .subtitle {
-#                 color: #7f8c8d;
-#                 margin-bottom: 30px;
-#             }
-#             </style>
-#             """,
-#             unsafe_allow_html=True
-#         )
-#         st.markdown("""
-#         <div class="lock-box">
-#             <div class="lock-icon">Locked</div>
-#             <div class="title">India Tax Residency Calculator</div>
-#             <div class="subtitle">Enter password to access Section 6 compliance tool</div>
-#         </div>
-#         """, unsafe_allow_html=True)
-#         with st.form("login_form", clear_on_submit=True):
-#             pwd = st.text_input("Password", type="password", placeholder="Enter password")
-#             submit = st.form_submit_button("Unlock")
-#             if submit:
-#                 if pwd == APP_PASSWORD:
-#                     st.session_state[SESSION_AUTH_KEY] = True
-#                     st.success("Unlocked! Access granted.")
-#                     st.rerun()
-#                 else:
-#                     st.error("Incorrect password.")
-#         st.stop()
-#     # Show logout button
-#     col1, col2 = st.columns([6, 1])
-#     with col2:
-#         if st.button("Logout", key="logout_btn"):
-#             st.session_state[SESSION_AUTH_KEY] = False
-#             st.rerun()
+# if SESSION_AUTH_KEY not in st.session_state:
+# st.session_state[SESSION_AUTH_KEY] = False
+# if not st.session_state[SESSION_AUTH_KEY]:
+# st.markdown(
+# """
+# <style>
+# .lock-box {
+# text-align: center;
+# margin-top: 120px;
+# font-family: 'Segoe UI', sans-serif;
+# }
+# .lock-icon {
+# font-size: 70px;
+# color: #e74c3c;
+# }
+# .title {
+# font-size: 32px;
+# font-weight: bold;
+# margin: 15px 0;
+# color: #2c3e50;
+# }
+# .subtitle {
+# color: #7f8c8d;
+# margin-bottom: 30px;
+# }
+# </style>
+# """,
+# unsafe_allow_html=True
+# )
+# st.markdown("""
+# <div class="lock-box">
+# <div class="lock-icon">Locked</div>
+# <div class="title">India Tax Residency Calculator</div>
+# <div class="subtitle">Enter password to access Section 6 compliance tool</div>
+# </div>
+# """, unsafe_allow_html=True)
+# with st.form("login_form", clear_on_submit=True):
+# pwd = st.text_input("Password", type="password", placeholder="Enter password")
+# submit = st.form_submit_button("Unlock")
+# if submit:
+# if pwd == APP_PASSWORD:
+# st.session_state[SESSION_AUTH_KEY] = True
+# st.success("Unlocked! Access granted.")
+# st.rerun()
+# else:
+# st.error("Incorrect password.")
+# st.stop()
+# # Show logout button
+# col1, col2 = st.columns([6, 1])
+# with col2:
+# if st.button("Logout", key="logout_btn"):
+# st.session_state[SESSION_AUTH_KEY] = False
+# st.rerun()
 # # === CALL AUTH FIRST ===
 # authenticate()
 # === YOUR FULL APP (UNCHANGED LOGIC) ===
@@ -109,16 +109,16 @@ def smart_pair(arrs, deps):
         else:
             pairs.append((arr, None))
             matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → NO DEPARTURE FOUND")
-  
+ 
     for j, dep in enumerate(deps):
         if j not in used and dep:
             pairs.append((None, dep))
             matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) → NO ARRIVAL")
-  
+ 
     return pairs, matches
 # === MAIN RESIDENCY CALCULATION (CORRECTED) ===
 def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
-                   income_15l=False, not_taxed_abroad=False, is_crew=False):
+                   income_15l=False, not_taxed_abroad=False, is_crew=False, assume_missing_days=0, assume_status="Non-Resident"):
     arrs, arr_invalids = parse_dates(arr_str)
     deps, dep_invalids = parse_dates(dep_str)
     paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
@@ -165,8 +165,7 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             threshold = 182
         elif is_visitor:
             threshold = 120 if income_15l else 182
-        prior4_days = sum(full_days.get(y - i, 0) for i in range(1, 5))
-        num_prior4_available = sum(1 for i in range(1, 5) if y - i >= min_y)
+        prior4_days = sum(full_days.get(y - i, assume_missing_days) for i in range(1, 5))
         deemed = is_citizen and income_15l and not_taxed_abroad
         if days == 0 and not deemed:
             residency[y] = ("Non-Resident", 0)
@@ -177,16 +176,12 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             reasons[y] = "Citizen + Income >₹15L + Not taxed abroad → Deemed Resident"
             is_res = True
         else:
-            prior_condition = (num_prior4_available == 4 and prior4_days >= 365)
+            prior_condition = prior4_days >= 365
             is_res = days >= 182 or (days >= threshold and prior_condition)
             if not is_res:
                 reason = f"<{threshold} days"
                 if days >= threshold:
-                    if num_prior4_available < 4:
-                        missing = 4 - num_prior4_available
-                        reason = f"≥{threshold} days but Prior 4 FYs not ascertainable (data for {missing} FYs unavailable)"
-                    else:
-                        reason = f"≥{threshold} days but Prior 4 FYs {prior4_days} < 365"
+                    reason = f"≥{threshold} days but Prior 4 FYs {prior4_days} < 365"
                 residency[y] = ("Non-Resident", days)
                 reasons[y] = reason
                 continue
@@ -206,9 +201,9 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                 residency[y] = ("Resident", days)
                 reasons[y] = base
         prior7_years = list(range(y-7, y))
-        rnor7 = sum(full_days.get(x, 0) for x in prior7_years) <= 729
+        rnor7 = sum(full_days.get(x, assume_missing_days) for x in prior7_years) <= 729
         prior10_years = list(range(y-10, y))
-        non_res10 = sum(1 for x in prior10_years if residency.get(x, ("Non-Resident",0))[0] == "Non-Resident")
+        non_res10 = sum(1 for x in prior10_years if residency.get(x, (assume_status, assume_missing_days))[0] == "Non-Resident")
         rnor9 = non_res10 >= 9
         rnor_visitor = is_visitor and income_15l and 120 <= days < 182
         rnor_deemed = deemed
@@ -227,14 +222,14 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         reasons[y] = reason
     total = sum(fy_days.values())
     warn_msg = "\n".join(warnings) if warnings else ""
-   
+  
     # Collect incomplete details
     incompletes = []
     for inv in arr_invalids:
         incompletes.append(f"Invalid Arrival Date: {inv} (No FY - invalid format)")
     for inv in dep_invalids:
         incompletes.append(f"Invalid Departure Date: {inv} (No FY - invalid format)")
-   
+  
     if match_log:
         for log in match_log:
             if "NO DEPARTURE FOUND" in log:
@@ -257,14 +252,14 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                         incompletes.append(f"Unpaired Departure on {date_str} (FY {fy}) - No arrival found")
                     except:
                         incompletes.append(f"Unpaired Departure (date parse error: {date_str}) - No arrival found")
-   
+  
     if warnings:
         for warn in warnings:
             if "skipped (missing pair)" in warn:
                 incompletes.append(f"Trip incomplete: {warn} (Follow up for missing date)")
             elif "invalid (arrival > departure)" in warn:
                 incompletes.append(f"Trip invalid: {warn} (Correct dates needed)")
-   
+  
     return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log, incompletes
 # === STREAMLIT UI ===
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
@@ -288,6 +283,11 @@ col_c, col_d = st.columns(2)
 income_15l = col_c.checkbox("Indian Income (excl. foreign) > ₹15 Lakh", value=False)
 not_taxed_abroad = col_d.checkbox("Not liable to tax in any foreign country", value=False, help="For Deemed Residency u/s 6(1A)")
 is_crew = st.checkbox("Crew member of Indian/foreign ship", value=False)
+assume_missing = st.selectbox("For unascertainable prior FYs (e.g., before 2010):", 
+                              ["Assume 0 days in India (Non-Resident - favorable)", "Assume 365 days in India (Resident - conservative)"],
+                              index=0)
+assume_missing_days = 0 if "0 days" in assume_missing else 365
+assume_status = "Non-Resident" if "0 days" in assume_missing else "Resident Ordinarily Resident (ROR)"
 col_btn1, col_btn2 = st.columns(2)
 calculate = col_btn1.button("Calculate Full Residency", type="primary", use_container_width=True)
 clear = col_btn2.button("Clear All", use_container_width=True)
@@ -305,7 +305,8 @@ if calculate:
         with st.spinner("Applying Section 6 rules..."):
             try:
                 fy_list, fy_days, residency, reasons, total, warns, _, fy_trips, match_log, incompletes = calculate_stay(
-                    arr, dep, emp_fys, smart, is_citizen, is_visitor, income_15l, not_taxed_abroad, is_crew
+                    arr, dep, emp_fys, smart, is_citizen, is_visitor, income_15l, not_taxed_abroad, is_crew,
+                    assume_missing_days=assume_missing_days, assume_status=assume_status
                 )
                 st.session_state.results = {
                     "fy_list": fy_list, "residency": residency, "reasons": reasons,
@@ -319,19 +320,19 @@ if calculate:
 # DISPLAY RESULTS
 if st.session_state.results:
     r = st.session_state.results
-  
+ 
     if smart and r["match_log"]:
         with st.expander("Smart Pairing Matches", expanded=False):
             st.code("\n".join(r["match_log"]), language="text")
-  
+ 
     if r["warns"]:
         st.warning(f"Warning: {r['warns']}")
-   
+  
     if r["incompletes"]:
         with st.expander("Incomplete Details - Follow up with Assessee", expanded=True):
             for inc in r["incompletes"]:
                 st.write(f"• {inc}")
-   
+  
     data = []
     for fy in r["fy_list"]:
         y = int(fy.split('-')[0])
@@ -372,17 +373,17 @@ Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
 """
         if r["match_log"]:
             report += "SMART PAIRING LOG:\n" + "\n".join(r["match_log"]) + "\n\n"
-       
+      
         if r["incompletes"]:
             report += "INCOMPLETE DETAILS (FOLLOW UP WITH ASSESSEE):\n"
             for inc in r["incompletes"]:
                 report += f"- {inc}\n"
             report += "\n"
-      
+     
         report += "FY\tDays\tStatus\tReason\n"
         for d in data:
             report += f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}\n"
-      
+     
         report += f"\nTOTAL DAYS IN INDIA: {r['total']}\n"
         report += "Calculator by: Aman Gautam (8433878823)\n"
         report += "100% compliant with Section 6, Finance Act 2020–2025"
