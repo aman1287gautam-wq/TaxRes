@@ -109,16 +109,13 @@ def smart_pair(arrs, deps):
         else:
             pairs.append((arr, None))
             matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) → NO DEPARTURE FOUND")
- 
     for j, dep in enumerate(deps):
         if j not in used and dep:
             pairs.append((None, dep))
             matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) → NO ARRIVAL")
- 
     return pairs, matches
 # === MAIN RESIDENCY CALCULATION (CORRECTED) ===
-def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_visitor=False,
-                   income_15l=False, not_taxed_abroad=False, is_crew=False, assume_missing_days=0, assume_status="Non-Resident"):
+def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_pio=False, is_coming_on_visit=False, income_15l=False, not_taxed_abroad=False, is_crew=False, assume_missing_days=0, assume_status="Non-Resident"):
     arrs, arr_invalids = parse_dates(arr_str)
     deps, dep_invalids = parse_dates(dep_str)
     paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
@@ -159,12 +156,12 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         days = full_days.get(y, 0)
         emp = y in emp_years
         threshold = 60
+        if (is_citizen or is_pio) and is_coming_on_visit:
+            threshold = 120 if income_15l else 182
         if is_crew:
             threshold = 182
-        elif emp:
+        elif emp and is_citizen:
             threshold = 182
-        elif is_visitor:
-            threshold = 120 if income_15l else 182
         prior4_days = sum(full_days.get(y - i, assume_missing_days) for i in range(1, 5))
         deemed = is_citizen and income_15l and not_taxed_abroad
         if days == 0 and not deemed:
@@ -188,13 +185,13 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
             else:
                 if days >= 182:
                     base = "≥182 days"
-                elif emp:
-                    base = "≥182 days (Employment abroad)"
                 elif is_crew:
                     base = "≥182 days (Crew)"
-                elif is_visitor and income_15l:
+                elif emp and is_citizen:
+                    base = "≥182 days (Employment abroad)"
+                elif (is_citizen or is_pio) and is_coming_on_visit and income_15l:
                     base = "≥120 days (Visitor/PIO + >₹15L) + Prior ≥365"
-                elif is_visitor:
+                elif (is_citizen or is_pio) and is_coming_on_visit:
                     base = "≥182 days (Visitor/PIO ≤₹15L) + Prior ≥365"
                 else:
                     base = "≥60 days + Prior 4 FYs ≥365"
@@ -205,31 +202,32 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
         prior10_years = list(range(y-10, y))
         non_res10 = sum(1 for x in prior10_years if residency.get(x, (assume_status, assume_missing_days))[0] == "Non-Resident")
         rnor9 = non_res10 >= 9
-        rnor_visitor = is_visitor and income_15l and 120 <= days < 182
+        rnor_visitor = (is_citizen or is_pio) and income_15l and 120 <= days < 182
         rnor_deemed = deemed
         is_rnor = rnor7 or rnor9 or rnor_visitor or rnor_deemed
         if is_rnor:
             parts = []
             if rnor9: parts.append("9/10 prior FYs NR")
             if rnor7: parts.append("≤729 days in prior 7 FYs")
-            if rnor_visitor: parts.append("120–181 days + >₹15L visitor")
+            if rnor_visitor: parts.append("120–181 days + >₹15L (Citizen/PIO)")
             if rnor_deemed: parts.append("Deemed resident")
             reason = f"{reasons[y]} → RNOR ({' | '.join(parts)})"
             residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
+            reasons[y] = reason
         else:
             reason = f"{reasons[y]} → Resident Ordinarily Resident (ROR)"
             residency[y] = ("Resident Ordinarily Resident (ROR)", days)
-        reasons[y] = reason
+            reasons[y] = reason
     total = sum(fy_days.values())
     warn_msg = "\n".join(warnings) if warnings else ""
-  
+ 
     # Collect incomplete details
     incompletes = []
     for inv in arr_invalids:
         incompletes.append(f"Invalid Arrival Date: {inv} (No FY - invalid format)")
     for inv in dep_invalids:
         incompletes.append(f"Invalid Departure Date: {inv} (No FY - invalid format)")
-  
+ 
     if match_log:
         for log in match_log:
             if "NO DEPARTURE FOUND" in log:
@@ -252,14 +250,14 @@ def calculate_stay(arr_str, dep_str, exc_fys, smart=False, is_citizen=True, is_v
                         incompletes.append(f"Unpaired Departure on {date_str} (FY {fy}) - No arrival found")
                     except:
                         incompletes.append(f"Unpaired Departure (date parse error: {date_str}) - No arrival found")
-  
+ 
     if warnings:
         for warn in warnings:
             if "skipped (missing pair)" in warn:
                 incompletes.append(f"Trip incomplete: {warn} (Follow up for missing date)")
             elif "invalid (arrival > departure)" in warn:
                 incompletes.append(f"Trip invalid: {warn} (Correct dates needed)")
-  
+ 
     return sorted_fy, fy_days, residency, reasons, total, warn_msg, years_range, fy_trips, match_log, incompletes
 # === STREAMLIT UI ===
 st.set_page_config(page_title="India Tax Residency - Full Sec 6", layout="wide")
@@ -276,18 +274,15 @@ with col2:
     dep = st.text_area("Departure Dates (space-separated)", height=220, placeholder="10/06/2024 20/08/2024 25/01/2025")
 smart = st.checkbox("Enable Smart Pairing (recommended)", value=True, help="Auto-matches earliest valid departure")
 st.subheader("Taxpayer Profile")
-col_a, col_b = st.columns(2)
-is_citizen = col_a.checkbox("Indian Citizen", value=True)
-is_visitor = col_b.checkbox("Visitor / PIO coming to India", value=False)
-col_c, col_d = st.columns(2)
-income_15l = col_c.checkbox("Indian Income (excl. foreign) > ₹15 Lakh", value=False)
-not_taxed_abroad = col_d.checkbox("Not liable to tax in any foreign country", value=False, help="For Deemed Residency u/s 6(1A)")
+taxpayer_type = st.radio("Select Taxpayer Type:", ["Indian Citizen", "Person of Indian Origin (PIO)", "Foreign Citizen (neither)"], index=0)
+is_citizen = taxpayer_type == "Indian Citizen"
+is_pio = taxpayer_type == "Person of Indian Origin (PIO)"
+is_coming_on_visit = st.checkbox("Coming on a visit to India from outside", value=False)
+income_15l = st.checkbox("Indian Income (excl. foreign) > ₹15 Lakh", value=False)
+not_taxed_abroad = st.checkbox("Not liable to tax in any foreign country", value=False, help="For Deemed Residency u/s 6(1A)", disabled=not is_citizen)
 is_crew = st.checkbox("Crew member of Indian/foreign ship", value=False)
-assume_missing = st.selectbox("For unascertainable prior FYs (e.g., before 2010):", 
-                              ["Assume 0 days in India (Non-Resident - favorable)", "Assume 365 days in India (Resident - conservative)"],
-                              index=0)
-assume_missing_days = 0 if "0 days" in assume_missing else 365
-assume_status = "Non-Resident" if "0 days" in assume_missing else "Resident Ordinarily Resident (ROR)"
+assume_missing_days = 365
+assume_status = "Resident Ordinarily Resident (ROR)"
 col_btn1, col_btn2 = st.columns(2)
 calculate = col_btn1.button("Calculate Full Residency", type="primary", use_container_width=True)
 clear = col_btn2.button("Clear All", use_container_width=True)
@@ -305,7 +300,7 @@ if calculate:
         with st.spinner("Applying Section 6 rules..."):
             try:
                 fy_list, fy_days, residency, reasons, total, warns, _, fy_trips, match_log, incompletes = calculate_stay(
-                    arr, dep, emp_fys, smart, is_citizen, is_visitor, income_15l, not_taxed_abroad, is_crew,
+                    arr, dep, emp_fys, smart, is_citizen, is_pio, is_coming_on_visit, income_15l, not_taxed_abroad, is_crew,
                     assume_missing_days=assume_missing_days, assume_status=assume_status
                 )
                 st.session_state.results = {
@@ -320,19 +315,17 @@ if calculate:
 # DISPLAY RESULTS
 if st.session_state.results:
     r = st.session_state.results
- 
     if smart and r["match_log"]:
         with st.expander("Smart Pairing Matches", expanded=False):
             st.code("\n".join(r["match_log"]), language="text")
- 
     if r["warns"]:
         st.warning(f"Warning: {r['warns']}")
-  
+ 
     if r["incompletes"]:
         with st.expander("Incomplete Details - Follow up with Assessee", expanded=True):
             for inc in r["incompletes"]:
                 st.write(f"• {inc}")
-  
+ 
     data = []
     for fy in r["fy_list"]:
         y = int(fy.split('-')[0])
@@ -373,17 +366,17 @@ Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}
 """
         if r["match_log"]:
             report += "SMART PAIRING LOG:\n" + "\n".join(r["match_log"]) + "\n\n"
-      
+     
         if r["incompletes"]:
             report += "INCOMPLETE DETAILS (FOLLOW UP WITH ASSESSEE):\n"
             for inc in r["incompletes"]:
                 report += f"- {inc}\n"
             report += "\n"
-     
+    
         report += "FY\tDays\tStatus\tReason\n"
         for d in data:
             report += f"{d['FY']}\t{d['Days']}\t{d['Status']}\t{d['Reason']}\n"
-     
+    
         report += f"\nTOTAL DAYS IN INDIA: {r['total']}\n"
         report += "Calculator by: Aman Gautam (8433878823)\n"
         report += "100% compliant with Section 6, Finance Act 2020–2025"
