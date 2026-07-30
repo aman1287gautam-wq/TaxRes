@@ -278,7 +278,7 @@ with st.expander("How residency is decided — full explanation", expanded=False
         "**FY 2025-26 and earlier** remain under the **Income-tax Act, 1961** (savings clause). The **9-of-10** and **729-day** look-back tests still reach into years that were governed by the old Act. "
         "Because the day-count logic is identical, the result is the same whichever Act applies.\n\n"
 
-        "*This tool is a computational aid, not tax or legal advice — verify unusual fact patterns against the bare text of Section 6.*"
+
     )
 
 for k in ["results", "selected_fy"]:
