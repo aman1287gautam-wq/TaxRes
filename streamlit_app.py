@@ -595,8 +595,7 @@ def build_html_report(r, rows):
 <tbody>{table_rows}</tbody></table>
 {sens_html}
 <p class="total">Total days in India: {r['total']}</p>
-<div class="foot">Calculator by Aman Gautam (8433878823). Computational aid only — not tax or legal advice.
-Verify flagged years against actual travel history before filing.</div>
+
 </body></html>"""
 
 if st.session_state.results:
