@@ -233,14 +233,52 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-with st.expander("How residency is decided (both Acts — same tests)", expanded=False):
+with st.expander("How residency is decided — full explanation", expanded=False):
     st.markdown(
-        "- **Resident [6(1)]:** >=182 days in the year, **or** >=60 days in the year and >=365 days across the 4 preceding years.\n"
-        "- **Explanation 1:** citizen leaving for employment/as crew, or citizen/PIO on a visit — the 60-day limit becomes 182 (or 120 if Indian income > Rs.15L).\n"
-        "- **Deemed Resident [6(1A)]:** Indian citizen, Indian income > Rs.15L, not taxable in any other country -> resident (always RNOR).\n"
-        "- **RNOR [6(6)]:** resident is RNOR if (a) NR in 9 of the 10 preceding years, (b) <=729 days in the 7 preceding years, (c) resident under the 120-day visitor rule, or (d) deemed resident.\n\n"
-        "The **Income-tax Act, 2025** keeps these exact tests; it governs tax years from **1 April 2026 (FY 2026-27)**. Earlier years stay under the **1961 Act**. "
-        "The 9-of-10 and 729-day look-back tests still reach into years governed by the old Act."
+        "Residential status is decided **separately for every financial year (tax year)** and depends purely on the "
+        "**number of days physically present in India** — not on citizenship, passport or visa. It is settled in two steps.\n\n"
+
+        "### Step 1 — Resident or Non-Resident? [Section 6(1)]\n"
+        "An individual is **Resident** for the year if **either** basic condition is met:\n"
+        "- **(a)** Present in India for **182 days or more** during the year; **or**\n"
+        "- **(b)** Present in India for **60 days or more** during the year **and** **365 days or more** in the **4 immediately preceding years** taken together.\n\n"
+        "If neither is met, the individual is **Non-Resident (NR)** for that year.\n\n"
+
+        "### Exceptions that modify the 60-day limb [Explanation 1 to 6(1)]\n"
+        "For certain people, condition (b)'s 60 days is **raised**, making it harder to become resident:\n"
+        "- **Indian citizen leaving India for employment abroad**, or **as a member of the crew of an Indian ship** — 60 days becomes **182 days**.\n"
+        "- **Indian citizen or PIO living abroad who comes on a visit to India** — 60 days becomes **182 days**; but if their **Indian income (i.e. total income other than foreign-source income) exceeds Rs.15 lakh**, it becomes **120 days** instead. "
+        "Under the 120-day route the person must **also** have 365+ days in the preceding 4 years to be resident.\n\n"
+
+        "### Deemed Resident [Section 6(1A)]\n"
+        "An **Indian citizen** whose **Indian income exceeds Rs.15 lakh** and who is **not liable to tax in any other country** (by reason of domicile, residence or similar) is **deemed resident** even with zero days in India — *unless* they are already resident under 6(1). "
+        "A deemed resident is **always classified RNOR** [via 6(6)(d)].\n\n"
+
+        "### Step 2 — If Resident: Ordinarily (ROR) or Not Ordinarily Resident (RNOR)? [Section 6(6)]\n"
+        "A resident is **RNOR** if **any** of these apply (otherwise they are **ROR**):\n"
+        "- **(a)** Non-Resident in **9 out of the 10** immediately preceding years; **or**\n"
+        "- **(b)** Present in India for **729 days or less** across the **7 immediately preceding years**; **or**\n"
+        "- **(c)** An Indian citizen / PIO **visitor with Indian income > Rs.15 lakh** who is resident only because of the **120-day** rule (i.e. 120–181 days that year); **or**\n"
+        "- **(d)** A person who is **deemed resident** under 6(1A).\n\n"
+        "RNOR is a transitional status — typically the first year or two after a long-term NRI returns to India.\n\n"
+
+        "### Why the classification matters (scope of tax)\n"
+        "- **ROR** — taxed on **global income** (Indian + foreign).\n"
+        "- **RNOR** — taxed on **Indian income**, plus foreign income only if it is from a **business controlled from / profession set up in India**; other foreign income is exempt.\n"
+        "- **Non-Resident** — taxed only on income **received, accruing or arising in India**.\n\n"
+
+        "### Counting the days\n"
+        "- Both the **day of arrival and the day of departure** count as days in India.\n"
+        "- Days are counted per financial year; a single stay spanning **31 March / 1 April** is split across the two years.\n"
+        "- The **60+365**, **729-day** and **9-of-10** tests look at **preceding** years — that is exactly what the *Preceding years* box below supplies when your data does not cover them.\n"
+        "- For an Indian-citizen crew member, **Rule 126** excludes eligible-voyage days from the count. This tool applies the 182-day rule for crew but does **not** auto-compute the Rule 126 exclusion.\n\n"
+
+        "### Which Act applies\n"
+        "The **Income-tax Act, 2025** carries these tests forward **unchanged** and governs tax years beginning **on or after 1 April 2026 (FY 2026-27)**. "
+        "**FY 2025-26 and earlier** remain under the **Income-tax Act, 1961** (savings clause). The **9-of-10** and **729-day** look-back tests still reach into years that were governed by the old Act. "
+        "Because the day-count logic is identical, the result is the same whichever Act applies.\n\n"
+
+        "*This tool is a computational aid, not tax or legal advice — verify unusual fact patterns against the bare text of Section 6.*"
     )
 
 for k in ["results", "selected_fy"]:
@@ -328,17 +366,22 @@ with st.container(border=True):
 # ------------------------------------------------------------------ #
 with st.container(border=True):
     st.subheader("Preceding years & employment")
-    e1, e2, e3 = st.columns(3)
-    with e1:
+    e_left, e_right = st.columns(2)
+    with e_left:
         prior_status = st.selectbox(
             "Status in ALL preceding years",
-            ["Non-Resident", "Resident"],
-            help="Applied to every year before your data window — used for the 9-of-10-years RNOR test.")
-    with e2:
-        prior_days = st.number_input(
-            "Days in India per preceding year", min_value=0, max_value=366, value=0, step=1,
-            help="Used for the 365-day (prior 4 FYs) and 729-day (prior 7 FYs) tests.")
-    with e3:
+            ["Resident", "Non-Resident"], index=0,
+            help="Default assumes the assessee was resident in every year before your data window. "
+                 "Switch to Non-Resident to supply that history.")
+        if prior_status == "Non-Resident":
+            prior_days = st.number_input(
+                "Days in India per preceding year", min_value=0, max_value=366, value=0, step=1,
+                help="Used for the 365-day (prior 4 FYs) and 729-day (prior 7 FYs) tests.")
+        else:
+            prior_days = 182  # ordinarily-resident assumption
+            st.caption("Assuming ordinarily resident throughout the preceding years. "
+                       "Select **Non-Resident** to enter prior-year days.")
+    with e_right:
         emp_fys = st.multiselect("Employment-abroad FYs", options=fy_list_reactive,
                                  help="FYs the assessee was employed outside India (182-day rule applies)")
 
@@ -362,16 +405,30 @@ if calculate:
             try:
                 full_days = fill_range(full_days_input)
                 emp_years = {int(fy.split('-')[0]) for fy in emp_fys}
-                residency, reasons = classify_years(
-                    full_days, emp_years, is_citizen, is_pio, is_visit,
-                    income_15l, not_taxed, is_crew, prior_status, int(prior_days))
+
+                def _classify(ps, pd):
+                    return classify_years(
+                        full_days, emp_years, is_citizen, is_pio, is_visit,
+                        income_15l, not_taxed, is_crew, ps, pd)
+
+                residency, reasons = _classify(prior_status, int(prior_days))
+
+                # Sensitivity: classify under both extreme prior-year histories
+                res_hi, _ = _classify("Resident", 182)       # ordinarily resident throughout
+                res_lo, _ = _classify("Non-Resident", 0)     # non-resident, no prior presence
+                sensitive = {}
+                for y in full_days:
+                    hi, lo = res_hi[y][0], res_lo[y][0]
+                    if hi != lo:
+                        sensitive[y] = (hi, lo)
+
                 st.session_state.results = {
                     "full_days": full_days, "residency": residency, "reasons": reasons,
                     "total": sum(full_days_input.values()),
                     "warns": "\n".join(warns_list), "fy_trips": fy_trips,
                     "match_log": match_log, "incompletes": incompletes,
                     "prior_status": prior_status, "prior_days": int(prior_days),
-                    "mode": mode,
+                    "sensitive": sensitive, "mode": mode,
                 }
                 st.session_state.selected_fy = None
                 st.rerun()
@@ -387,6 +444,15 @@ STATUS_STYLE = {
     "Resident but Not Ordinarily Resident (RNOR)": ("#fdf0d5", "#7a4b00"),
 }
 
+def short_status(s):
+    if is_nonresident(s):
+        return "NR"
+    if "Not Ordinarily" in s:
+        return "RNOR"
+    if "Ordinarily Resident" in s:
+        return "ROR"
+    return s
+
 if st.session_state.results:
     r = st.session_state.results
 
@@ -394,7 +460,7 @@ if st.session_state.results:
     for y in sorted(r["full_days"]):
         status, days = r["residency"].get(y, ("", r["full_days"][y]))
         rows.append({"FY": fy_label(y), "Days": days, "Status": status,
-                     "Act": governing_act(y), "Reason": r["reasons"].get(y, "")})
+                     "Reason": r["reasons"].get(y, "")})
     df = pd.DataFrame(rows)
 
     # ---- summary metrics ----
@@ -422,6 +488,38 @@ if st.session_state.results:
             for inc in r["incompletes"]:
                 st.write(f"- {inc}")
 
+    # ---- prior-year sensitivity ----
+    if r.get("sensitive"):
+        assumed = ("Resident throughout the preceding years"
+                   if r["prior_status"] == "Resident"
+                   else f"Non-Resident, {r['prior_days']} day(s)/year in preceding years")
+        core_flip = any(
+            (is_nonresident(hi) != is_nonresident(lo))
+            for hi, lo in r["sensitive"].values()
+        )
+        st.warning(
+            f"**Prior-year sensitivity — confirm before relying on this.** "
+            f"The FY(s) below change classification depending on the assessee's residency in earlier years. "
+            f"The table uses your assumption (**{assumed}**). "
+            + ("**At least one year's core Resident/Non-Resident determination flips**, "
+               "so the entire scope of taxation is at stake — verify the actual prior-year day counts. "
+               if core_flip else
+               "The split is between ROR and RNOR (which foreign income is taxable), not the core status. ")
+            + "If your assumption is wrong, switch the **Status in ALL preceding years** control (and enter days) to the true history."
+        )
+        srows = []
+        for y in sorted(r["sensitive"]):
+            hi, lo = r["sensitive"][y]
+            disp = r["residency"].get(y, ("", 0))[0]
+            srows.append({
+                "FY": fy_label(y),
+                "Days": r["full_days"][y],
+                "Shown (your assumption)": short_status(disp),
+                "If resident in prior years": short_status(hi),
+                "If non-resident in prior years": short_status(lo),
+            })
+        st.dataframe(pd.DataFrame(srows), use_container_width=True, hide_index=True)
+
     # ---- colour-coded table ----
     def _row_style(row):
         bg, fg = STATUS_STYLE.get(row["Status"], ("", ""))
@@ -434,7 +532,6 @@ if st.session_state.results:
             "FY": st.column_config.TextColumn(width="small"),
             "Days": st.column_config.NumberColumn(width="small"),
             "Status": st.column_config.TextColumn(width="medium"),
-            "Act": st.column_config.TextColumn(width="small"),
             "Reason": st.column_config.TextColumn(width="large"),
         },
     )
@@ -453,14 +550,22 @@ if st.session_state.results:
 
     # ---- copy for Excel (TSV) ----
     st.markdown("**Copy for Excel** — click the copy icon on the box below, then paste into a sheet.")
-    tsv = "FY\tDays\tStatus\tAct\tReason\n" + "\n".join(
-        f"{x['FY']}\t{x['Days']}\t{x['Status']}\t{x['Act']}\t{x['Reason']}" for x in rows)
+    tsv = "FY\tDays\tStatus\tReason\n" + "\n".join(
+        f"{x['FY']}\t{x['Days']}\t{x['Status']}\t{x['Reason']}" for x in rows)
     st.code(tsv, language="text")
 
     # ---- downloads ----
     report = "INDIA TAX RESIDENCY REPORT (SECTION 6)\n" + "=" * 60 + "\n"
     report += f"Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}\n" + "-" * 60 + "\n\n"
     report += f"Preceding-year assumption: {r['prior_status']}, {r['prior_days']} days/year\n\n"
+    if r.get("sensitive"):
+        report += "PRIOR-YEAR SENSITIVITY (verify actual prior-year presence):\n"
+        for y in sorted(r["sensitive"]):
+            hi, lo = r["sensitive"][y]
+            report += (f"- {fy_label(y)}: {short_status(r['residency'][y][0])} as shown | "
+                       f"{short_status(hi)} if resident in prior years | "
+                       f"{short_status(lo)} if non-resident in prior years\n")
+        report += "\n"
     if r["match_log"]:
         report += "SMART PAIRING LOG:\n" + "\n".join(r["match_log"]) + "\n\n"
     if r["incompletes"]:
@@ -482,5 +587,5 @@ else:
 
 st.markdown(
     "<p style='text-align:center;color:#8a97a6;font-size:.8rem;margin-top:1.2rem;'>"
-    "Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025 · Not legal/tax advice · "
+    "Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025  "
     "Made with care by <b>Aman Gautam</b></p>", unsafe_allow_html=True)
