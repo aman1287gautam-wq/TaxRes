@@ -1,7 +1,10 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime, timedelta
 from collections import defaultdict
+from html import escape as _esc
+import base64
 import re
 
 # =====================================================================
@@ -102,17 +105,27 @@ def basic_threshold(is_citizen, is_pio, is_visit, income_15l, emp, is_crew):
 # CORE ENGINE — classify a contiguous dict of {year: days}
 # ---------------------------------------------------------------------
 def classify_years(full_days, emp_years, is_citizen, is_pio, is_visit,
-                   income_15l, not_taxed, is_crew, prior_status, prior_days):
+                   income_15l, not_taxed, is_crew, prior_status, prior_days, prior_map=None):
     residency, reasons = {}, {}
-    prior_nr = (prior_status == "Non-Resident")
+    prior_map = prior_map or {}
+    default_res = "Non-Resident" if prior_status == "Non-Resident" else "Resident Ordinarily Resident (ROR)"
+
+    def _norm(s):
+        return "Non-Resident" if str(s) == "Non-Resident" else "Resident Ordinarily Resident (ROR)"
 
     def days_in(y):
-        return full_days.get(y, prior_days)
+        if y in full_days:
+            return full_days[y]
+        if y in prior_map:
+            return prior_map[y]["days"]
+        return prior_days
 
     def status_of(y):
         if y in residency:
             return residency[y][0]
-        return "Non-Resident" if prior_nr else "Resident Ordinarily Resident (ROR)"
+        if y in prior_map:
+            return _norm(prior_map[y]["status"])
+        return default_res
 
     for y in sorted(full_days):
         days = full_days[y]
@@ -278,7 +291,7 @@ with st.expander("How residency is decided — full explanation", expanded=False
         "**FY 2025-26 and earlier** remain under the **Income-tax Act, 1961** (savings clause). The **9-of-10** and **729-day** look-back tests still reach into years that were governed by the old Act. "
         "Because the day-count logic is identical, the result is the same whichever Act applies.\n\n"
 
-
+        "*This tool is a computational aid, not tax or legal advice — verify unusual fact patterns against the bare text of Section 6.*"
     )
 
 for k in ["results", "selected_fy"]:
@@ -368,22 +381,52 @@ with st.container(border=True):
     st.subheader("Preceding years & employment")
     e_left, e_right = st.columns(2)
     with e_left:
-        prior_status = st.selectbox(
-            "Status in ALL preceding years",
-            ["Resident", "Non-Resident"], index=0,
-            help="Default assumes the assessee was resident in every year before your data window. "
-                 "Switch to Non-Resident to supply that history.")
-        if prior_status == "Non-Resident":
-            prior_days = st.number_input(
-                "Days in India per preceding year", min_value=0, max_value=366, value=0, step=1,
-                help="Used for the 365-day (prior 4 FYs) and 729-day (prior 7 FYs) tests.")
-        else:
-            prior_days = 182  # ordinarily-resident assumption
-            st.caption("Assuming ordinarily resident throughout the preceding years. "
-                       "Select **Non-Resident** to enter prior-year days.")
+        prior_choice = st.selectbox(
+            "Residential status in ALL preceding years",
+            ["— select —", "Resident in all preceding years", "Non-Resident (enter each year)"],
+            index=0,
+            help="Required. Drives the 365-day, 729-day and 9-of-10-year tests.")
     with e_right:
         emp_fys = st.multiselect("Employment-abroad FYs", options=fy_list_reactive,
                                  help="FYs the assessee was employed outside India (182-day rule applies)")
+
+    prior_status, prior_days, prior_map = None, 0, {}
+    if prior_choice == "Resident in all preceding years":
+        prior_status, prior_days = "Resident", 182
+        st.caption("Assuming ordinarily resident throughout the preceding years.")
+    elif prior_choice.startswith("Non-Resident"):
+        prior_status, prior_days = "Non-Resident", 0
+        if detected_min is not None:
+            st.caption("Enter each preceding year's status and days in India. "
+                       "These feed the 365-day (last 4 FYs), 729-day (last 7 FYs) and 9-of-10-year tests.")
+            pri_years = list(range(detected_min - 10, detected_min))
+            seed = pd.DataFrame({
+                "FY": [fy_label(y) for y in pri_years],
+                "Status": ["Non-Resident"] * len(pri_years),
+                "Days": [0] * len(pri_years),
+            })
+            edited_prior = st.data_editor(
+                seed, hide_index=True, use_container_width=True,
+                column_config={
+                    "FY": st.column_config.TextColumn("FY", disabled=True, width="small"),
+                    "Status": st.column_config.SelectboxColumn(
+                        "Status", options=["Non-Resident", "Resident"], width="medium"),
+                    "Days": st.column_config.NumberColumn(
+                        "Days in India", min_value=0, max_value=366, step=1, width="small"),
+                },
+                key=f"prior_editor_{detected_min}",
+            )
+            for _, row in edited_prior.iterrows():
+                mm = re.match(r"(\d{4})", str(row["FY"]))
+                if mm:
+                    yy = int(mm.group(1))
+                    try:
+                        dd = int(row["Days"] or 0)
+                    except (ValueError, TypeError):
+                        dd = 0
+                    prior_map[yy] = {"status": row["Status"], "days": max(0, min(366, dd))}
+        else:
+            st.info("Enter trip / FY data above to list the preceding years.")
 
 # ------------------------------------------------------------------ #
 # 4) ACTIONS
@@ -400,22 +443,24 @@ if clear:
 if calculate:
     if not full_days_input:
         st.error("No data yet — enter dates (or FY + Days) first.")
+    elif prior_choice == "— select —":
+        st.error("Please choose the residential status in the preceding years first.")
     else:
         with st.spinner("Applying Section 6 rules..."):
             try:
                 full_days = fill_range(full_days_input)
                 emp_years = {int(fy.split('-')[0]) for fy in emp_fys}
 
-                def _classify(ps, pd):
+                def _classify(ps, pd, pm=None):
                     return classify_years(
                         full_days, emp_years, is_citizen, is_pio, is_visit,
-                        income_15l, not_taxed, is_crew, ps, pd)
+                        income_15l, not_taxed, is_crew, ps, pd, pm)
 
-                residency, reasons = _classify(prior_status, int(prior_days))
+                residency, reasons = _classify(prior_status, int(prior_days), prior_map)
 
-                # Sensitivity: classify under both extreme prior-year histories
-                res_hi, _ = _classify("Resident", 182)       # ordinarily resident throughout
-                res_lo, _ = _classify("Non-Resident", 0)     # non-resident, no prior presence
+                # Sensitivity: pure extreme prior-year histories (map-free)
+                res_hi, _ = _classify("Resident", 182)
+                res_lo, _ = _classify("Non-Resident", 0)
                 sensitive = {}
                 for y in full_days:
                     hi, lo = res_hi[y][0], res_lo[y][0]
@@ -428,7 +473,13 @@ if calculate:
                     "warns": "\n".join(warns_list), "fy_trips": fy_trips,
                     "match_log": match_log, "incompletes": incompletes,
                     "prior_status": prior_status, "prior_days": int(prior_days),
+                    "prior_choice": prior_choice, "prior_map": dict(prior_map),
                     "sensitive": sensitive, "mode": mode,
+                    "profile": {
+                        "type": taxpayer_type, "visit": is_visit, "income_15l": income_15l,
+                        "not_taxed": not_taxed, "crew": is_crew, "emp": list(emp_fys),
+                        "smart": smart,
+                    },
                 }
                 st.session_state.selected_fy = None
                 st.rerun()
@@ -452,6 +503,101 @@ def short_status(s):
     if "Ordinarily Resident" in s:
         return "ROR"
     return s
+
+def _status_class(s):
+    if is_nonresident(s):
+        return "nr"
+    if "Not Ordinarily" in s:
+        return "rnor"
+    return "ror"
+
+def build_html_report(r, rows):
+    now = datetime.now().strftime("%d %B %Y, %I:%M %p")
+    p = r.get("profile", {})
+    prof_bits = [f"Type: {p.get('type','-')}"]
+    if p.get("visit"): prof_bits.append("On a visit to India")
+    if p.get("income_15l"): prof_bits.append("Indian income &gt; Rs.15L")
+    if p.get("not_taxed"): prof_bits.append("Not taxed abroad")
+    if p.get("crew"): prof_bits.append("Crew member")
+    if p.get("emp"): prof_bits.append("Employment-abroad FYs: " + ", ".join(p["emp"]))
+    prof_bits.append(f"Preceding years: {_esc(r.get('prior_choice',''))}")
+
+    table_rows = ""
+    for x in rows:
+        cls = _status_class(x["Status"])
+        table_rows += (f"<tr><td>{_esc(x['FY'])}</td><td class='num'>{x['Days']}</td>"
+                       f"<td class='{cls}'>{_esc(x['Status'])}</td>"
+                       f"<td>{_esc(x['Reason'])}</td></tr>")
+
+    sens_html = ""
+    if r.get("sensitive"):
+        sr = ""
+        for y in sorted(r["sensitive"]):
+            hi, lo = r["sensitive"][y]
+            disp = r["residency"].get(y, ("", 0))[0]
+            sr += (f"<tr><td>{_esc(fy_label(y))}</td><td class='num'>{r['full_days'][y]}</td>"
+                   f"<td>{_esc(short_status(disp))}</td><td>{_esc(short_status(hi))}</td>"
+                   f"<td>{_esc(short_status(lo))}</td></tr>")
+        sens_html = (
+            "<h3>Prior-year sensitivity — verify before relying</h3>"
+            "<p>These years change classification depending on the assessee's residency in earlier years. "
+            "The main table uses the selected assumption.</p>"
+            "<table><thead><tr><th>FY</th><th>Days</th><th>Shown</th>"
+            "<th>If resident in prior years</th><th>If non-resident in prior years</th></tr></thead>"
+            f"<tbody>{sr}</tbody></table>")
+
+    pairing_html = ""
+    if r.get("match_log"):
+        pairing_html = ("<h3>Smart pairing log</h3><pre>" +
+                        _esc("\n".join(r["match_log"])) + "</pre>")
+
+    incomplete_html = ""
+    if r.get("incompletes"):
+        items = "".join(f"<li>{_esc(i)}</li>" for i in r["incompletes"])
+        incomplete_html = f"<h3>Incomplete details — follow up with assessee</h3><ul>{items}</ul>"
+
+    prior_map_html = ""
+    if r.get("prior_map"):
+        pm = "".join(
+            f"<tr><td>{_esc(fy_label(y))}</td><td>{_esc(r['prior_map'][y]['status'])}</td>"
+            f"<td class='num'>{r['prior_map'][y]['days']}</td></tr>"
+            for y in sorted(r["prior_map"]))
+        prior_map_html = ("<h3>Preceding-year data entered</h3>"
+                          "<table><thead><tr><th>FY</th><th>Status</th><th>Days</th></tr></thead>"
+                          f"<tbody>{pm}</tbody></table>")
+
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>India Tax Residency Report</title>
+<style>
+ body{{font-family:Arial,Helvetica,sans-serif;color:#1a2027;margin:32px;line-height:1.45;}}
+ h1{{margin:0 0 2px;font-size:22px;}} h3{{margin:22px 0 8px;font-size:15px;color:#203a43;
+     border-bottom:2px solid #e6e9ef;padding-bottom:4px;}}
+ .meta{{color:#5a6675;font-size:12px;margin-bottom:6px;}}
+ .total{{font-size:16px;font-weight:bold;margin-top:18px;}}
+ table{{border-collapse:collapse;width:100%;margin-top:6px;font-size:12px;}}
+ th,td{{border:1px solid #cdd3dd;padding:6px 8px;text-align:left;vertical-align:top;}}
+ th{{background:#f1f4f8;}} td.num{{text-align:right;}}
+ .nr{{background:#e8eef7;}} .ror{{background:#e3f4e1;}} .rnor{{background:#fdf0d5;}}
+ pre{{background:#f6f8fa;border:1px solid #e6e9ef;border-radius:6px;padding:10px;font-size:11px;
+      white-space:pre-wrap;}}
+ .foot{{margin-top:26px;color:#7a8797;font-size:11px;border-top:1px solid #e6e9ef;padding-top:8px;}}
+ @media print{{ body{{margin:12mm;}} }}
+</style></head><body>
+<h1>India Tax Residency Report</h1>
+<div class="meta">Section 6 — Income-tax Act 1961 &amp; Income-tax Act 2025 &nbsp;·&nbsp; Generated {now}</div>
+<h3>Taxpayer profile</h3>
+<p>{' &nbsp;·&nbsp; '.join(prof_bits)}</p>
+{prior_map_html}
+{pairing_html}
+{incomplete_html}
+<h3>Residency by financial year</h3>
+<table><thead><tr><th>FY</th><th>Days</th><th>Status</th><th>Reason</th></tr></thead>
+<tbody>{table_rows}</tbody></table>
+{sens_html}
+<p class="total">Total days in India: {r['total']}</p>
+<div class="foot">Calculator by Aman Gautam (8433878823). Computational aid only — not tax or legal advice.
+Verify flagged years against actual travel history before filing.</div>
+</body></html>"""
 
 if st.session_state.results:
     r = st.session_state.results
@@ -575,17 +721,45 @@ if st.session_state.results:
     report += "Calculator by: Aman Gautam (8433878823)\n"
     report += "Compliant with Section 6 — Income-tax Act 1961 & Income-tax Act 2025"
 
-    d1, d2 = st.columns(2)
-    d1.download_button("Download report (.txt)", report,
-                       file_name=f"Tax_Residency_{datetime.now().strftime('%Y%m%d')}.txt",
+    html_report = build_html_report(r, rows)
+    stamp = datetime.now().strftime("%Y%m%d")
+
+    st.markdown("### Report")
+    # One-click print of the full formatted report (opens print dialog)
+    b64 = base64.b64encode(html_report.encode("utf-8")).decode()
+    print_btn = f"""
+    <button id="printBtn" style="width:100%;padding:10px 14px;border:0;border-radius:10px;
+        background:#203a43;color:#fff;font-weight:600;font-size:14px;cursor:pointer;">
+        Print full report (smart pairing, sensitivity &amp; all)</button>
+    <script>
+      const B64 = "{b64}";
+      document.getElementById("printBtn").onclick = function() {{
+        const html = decodeURIComponent(escape(atob(B64)));
+        const w = window.open("", "_blank");
+        if (!w) {{ alert("Please allow pop-ups to print, or use the HTML download."); return; }}
+        w.document.open(); w.document.write(html); w.document.close();
+        w.focus(); setTimeout(function(){{ w.print(); }}, 400);
+      }};
+    </script>
+    """
+    components.html(print_btn, height=60)
+
+    d1, d2, d3 = st.columns(3)
+    d1.download_button("Report (.txt)", report,
+                       file_name=f"Tax_Residency_{stamp}.txt",
                        mime="text/plain", use_container_width=True)
-    d2.download_button("Download table (.csv)", df.to_csv(index=False),
-                       file_name=f"Tax_Residency_{datetime.now().strftime('%Y%m%d')}.csv",
+    d2.download_button("Table (.csv)", df.to_csv(index=False),
+                       file_name=f"Tax_Residency_{stamp}.csv",
                        mime="text/csv", use_container_width=True)
+    d3.download_button("Printable report (.html)", html_report,
+                       file_name=f"Tax_Residency_{stamp}.html",
+                       mime="text/html", use_container_width=True)
+    st.caption("Print opens the full formatted report in a new tab and launches your print dialog "
+               "(choose *Save as PDF* there). If pop-ups are blocked, download the HTML and open it.")
 else:
     st.info("Fill in the inputs above and click **Calculate residency**.")
 
 st.markdown(
     "<p style='text-align:center;color:#8a97a6;font-size:.8rem;margin-top:1.2rem;'>"
-    "Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025  "
+    "Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025 · Not legal/tax advice · "
     "Made with care by <b>Aman Gautam</b></p>", unsafe_allow_html=True)
