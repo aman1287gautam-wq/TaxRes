@@ -1,11 +1,13 @@
+import base64
+import hashlib
+import re
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta
+from html import escape as _esc
+
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import pandas as pd
-from datetime import datetime, timedelta
-from collections import defaultdict
-from html import escape as _esc
-import base64
-import re
 
 # =====================================================================
 #  India Tax Residency Calculator  —  Section 6
@@ -13,24 +15,60 @@ import re
 #  By Aman Gautam (8433878823)
 # =====================================================================
 
+# Full-width argument for widgets: `width="stretch"` on newer Streamlit, `use_container_width` on older
+try:
+    _ver = tuple(int(x) for x in st.__version__.split(".")[:2])
+except ValueError:
+    _ver = (0, 0)
+WIDE = {"width": "stretch"} if _ver >= (1, 50) else {"use_container_width": True}
+
+AMENDMENT_2020 = 2020   # Finance Act 2020: 120-day rule, 6(1A), 6(6)(c)/(d) from FY 2020-21
+
+STATUS_NR = "Non-Resident"
+STATUS_ROR = "Resident Ordinarily Resident (ROR)"
+STATUS_RNOR = "Resident but Not Ordinarily Resident (RNOR)"
+
+# Per-year circumstances (Explanation 1 to Section 6(1))
+SIT_NORMAL = "Living in India / none (60-day rule)"
+SIT_EMP = "Left India for employment abroad in this FY [Expl. 1(a)]"
+SIT_CREW = "Left India as crew of an Indian ship in this FY [Expl. 1(a)]"
+SIT_VISIT = "Based abroad, came to India on visit(s) [Expl. 1(b)]"
+SITUATIONS = [SIT_NORMAL, SIT_EMP, SIT_CREW, SIT_VISIT]
+SIT_SHORT = {SIT_NORMAL: "", SIT_EMP: "Expl.1(a) employment", SIT_CREW: "Expl.1(a) crew",
+             SIT_VISIT: "Expl.1(b) visit"}
+
+COL_SIT = "Situation"
+COL_INC = "Indian income > Rs.15L"
+COL_NOTAX = "Not liable to tax abroad"
+
+
 # ---------------------------------------------------------------------
 # FY helpers
 # ---------------------------------------------------------------------
 def fy_start_year(d):
     return d.year if d.month >= 4 else d.year - 1
 
+
 def fy_label(year):
     return f"{year}-{year + 1}"
 
-def fy_of(date):
-    return fy_label(fy_start_year(date))
 
-def governing_act(year):
-    # New Act applies to tax years beginning on/after 1 April 2026 (FY 2026-27+)
-    return "IT Act 2025" if year >= 2026 else "IT Act 1961"
+def fmt(d):
+    return d.strftime("%d/%m/%Y")
+
 
 def is_nonresident(status):
     return str(status).strip().lower().startswith("non-resident")
+
+
+def short_status(s):
+    if is_nonresident(s):
+        return "NR"
+    if "Not Ordinarily" in s:
+        return "RNOR"
+    if "Ordinarily Resident" in s:
+        return "ROR"
+    return s
 
 
 # ---------------------------------------------------------------------
@@ -41,77 +79,204 @@ DATE_FORMATS = ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
                 "%d/%m/%y", "%d-%m-%y", "%d.%m.%y",
                 "%Y-%m-%d", "%Y/%m/%d")
 
+
 def parse_dates(text):
     dates, invalids = [], []
     if not text:
         return dates, invalids
     for s in re.sub(r"[,;\n\r\t]+", " ", text).split():
-        s = s.strip()
-        if not s:
-            continue
         if s.upper() in PLACEHOLDERS:
             invalids.append(s)
             continue
         parsed = None
-        for fmt in DATE_FORMATS:
+        for f in DATE_FORMATS:
             try:
-                parsed = datetime.strptime(s, fmt).date()
+                parsed = datetime.strptime(s, f).date()
                 break
             except ValueError:
                 continue
-        (dates if parsed else invalids).append(parsed if parsed else s)
+        if parsed:
+            dates.append(parsed)
+        else:
+            invalids.append(s)
     return dates, invalids
 
 
 # ---------------------------------------------------------------------
-# Smart pairing
+# Presence in India from arrival / departure dates
 # ---------------------------------------------------------------------
-def smart_pair(arrs, deps):
-    pairs, used, matches = [], set(), []
-    for i, arr in enumerate(arrs):
-        if not arr:
-            pairs.append((arr, None)); continue
-        cands = [(j, dep) for j, dep in enumerate(deps) if dep and dep >= arr and j not in used]
-        if cands:
-            cands.sort(key=lambda x: ((x[1] - arr).days, x[0]))
-            j, dep = cands[0]; used.add(j)
-            pairs.append((arr, dep))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) -> "
-                           f"Departure {j+1} ({dep.strftime('%d/%m/%Y')})  |  {(dep-arr).days+1} days")
+def compute_presence(arr_text, dep_text, chronological=True, data_from=None, data_to=None):
+    """Build the set of days the person was certainly in India, plus days that
+    may have been in India where a record is missing.
+
+    Chronological pairing walks all movements in date order:
+    an arrival opens a stay, the next departure closes it. Two departures in a
+    row mean a missing arrival; two arrivals in a row mean a missing departure.
+    """
+    arrs, arr_inv = parse_dates(arr_text)
+    deps, dep_inv = parse_dates(dep_text)
+    certain, maybe = set(), set()
+    fy_trips = defaultdict(list)
+    log, warns = [], []
+    incompletes = [f"Unreadable arrival entry: {x}" for x in arr_inv]
+    incompletes += [f"Unreadable departure entry: {x}" for x in dep_inv]
+
+    def add_span(a, b, target, label=None):
+        cur = a
+        while cur <= b:
+            target.add(cur)
+            cur += timedelta(days=1)
+        if label:
+            for y in range(fy_start_year(a), fy_start_year(b) + 1):
+                fy_trips[y].append(label)
+
+    for d in arrs + deps:
+        if data_from and d < data_from:
+            warns.append(f"{fmt(d)} is before the 'Data available from' date {fmt(data_from)}")
+        if data_to and d > data_to:
+            warns.append(f"{fmt(d)} is after the 'Data available up to' date {fmt(data_to)}")
+
+    if not chronological:
+        n = max(len(arrs), len(deps))
+        for i in range(n):
+            a = arrs[i] if i < len(arrs) else None
+            d = deps[i] if i < len(deps) else None
+            if a and d and a <= d:
+                lbl = f"Row {i+1}: {fmt(a)} -> {fmt(d)} ({(d-a).days+1} days)"
+                add_span(a, d, certain, lbl)
+                log.append(lbl)
+            elif a and d:
+                warns.append(f"Row {i+1}: arrival {fmt(a)} is after departure {fmt(d)} — skipped")
+            else:
+                incompletes.append(f"Row {i+1}: {'arrival ' + fmt(a) if a else 'departure ' + fmt(d)} "
+                                   f"has no matching entry — skipped")
+        return _presence_result(certain, maybe, fy_trips, log, warns, incompletes)
+
+    events = defaultdict(lambda: {"A": [], "D": []})
+    for label, lst, key in (("arrival", arrs, "A"), ("departure", deps, "D")):
+        seen = set()
+        for i, d in enumerate(lst, 1):
+            if d in seen:
+                warns.append(f"Duplicate {label} date {fmt(d)} (entry {i}) ignored")
+                continue
+            seen.add(d)
+            events[d][key].append(i)
+
+    state, start, start_n, last_dep = None, None, None, None
+    for d in sorted(events):
+        ev = events[d]
+        # Same-day arrival & departure: if inside, leave first; if outside, arrive first
+        order = ("D", "A") if state == "in" else ("A", "D")
+        for typ in order:
+            for n in ev[typ]:
+                if typ == "A":
+                    if state == "in":
+                        add_span(start, start, certain, f"Arrival {start_n}: {fmt(start)} (departure missing)")
+                        gap = (d - start).days - 1
+                        if gap > 0:
+                            add_span(start + timedelta(days=1), d - timedelta(days=1), maybe)
+                        msg = (f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE before next arrival on {fmt(d)}")
+                        log.append(msg)
+                        incompletes.append(f"{msg}: departure date missing; up to {max(gap, 0)} more day(s) "
+                                           f"may have been spent in India")
+                    state, start, start_n = "in", d, n
+                else:
+                    if state == "in":
+                        lbl = f"Arrival {start_n} ({fmt(start)}) -> Departure {n} ({fmt(d)}) | {(d-start).days+1} days"
+                        add_span(start, d, certain, lbl)
+                        log.append(lbl)
+                    elif state is None:
+                        if data_from and data_from <= d:
+                            lbl = (f"Departure {n} ({fmt(d)}) -> NO ARRIVAL; counted from data start "
+                                   f"{fmt(data_from)} | {(d-data_from).days+1} days")
+                            add_span(data_from, d, certain, lbl)
+                            log.append(lbl)
+                            incompletes.append(f"Departure {n} ({fmt(d)}) has no earlier arrival: assumed in India "
+                                               f"from the data start date {fmt(data_from)}")
+                        else:
+                            add_span(d, d, certain, f"Departure {n}: {fmt(d)} (arrival before data start)")
+                            msg = f"Departure {n} ({fmt(d)}) -> NO ARRIVAL (in India before the data begins)"
+                            log.append(msg)
+                            incompletes.append(f"{msg}: only the departure day is counted. Enter 'Data available "
+                                               f"from' to count the stay from that date")
+                    else:  # two departures in a row
+                        add_span(d, d, certain, f"Departure {n}: {fmt(d)} (arrival missing)")
+                        gap = (d - last_dep).days - 1
+                        if gap > 0:
+                            add_span(last_dep + timedelta(days=1), d - timedelta(days=1), maybe)
+                        msg = f"Departure {n} ({fmt(d)}) -> NO ARRIVAL after previous departure on {fmt(last_dep)}"
+                        log.append(msg)
+                        incompletes.append(f"{msg}: arrival date missing; up to {max(gap, 0)} more day(s) "
+                                           f"may have been spent in India")
+                    state, last_dep = "out", d
+
+    if state == "in":
+        if data_to and data_to >= start:
+            lbl = (f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE; counted till data end "
+                   f"{fmt(data_to)} | {(data_to-start).days+1} days")
+            add_span(start, data_to, certain, lbl)
+            log.append(lbl)
+            incompletes.append(f"Arrival {start_n} ({fmt(start)}) has no later departure: assumed in India "
+                               f"till the data end date {fmt(data_to)}")
         else:
-            pairs.append((arr, None))
-            matches.append(f"Arrival {i+1} ({arr.strftime('%d/%m/%Y')}) -> NO DEPARTURE FOUND")
-    for j, dep in enumerate(deps):
-        if j not in used and dep:
-            pairs.append((None, dep))
-            matches.append(f"Departure {j+1} ({dep.strftime('%d/%m/%Y')}) -> NO ARRIVAL")
-    return pairs, matches
+            add_span(start, start, certain, f"Arrival {start_n}: {fmt(start)} (no departure)")
+            msg = f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE FOUND"
+            log.append(msg)
+            incompletes.append(f"{msg}: only the arrival day is counted. Enter 'Data available up to' "
+                               f"to count the stay till that date")
+
+    return _presence_result(certain, maybe, fy_trips, log, warns, incompletes)
+
+
+def _presence_result(certain, maybe, fy_trips, log, warns, incompletes):
+    maybe = maybe - certain
+    days = dict(Counter(fy_start_year(d) for d in certain))
+    max_days = dict(Counter(fy_start_year(d) for d in certain | maybe))
+    return {"days": days, "max_days": max_days, "fy_trips": dict(fy_trips),
+            "log": log, "warns": warns, "incompletes": incompletes,
+            "uncertain": bool(maybe)}
+
+
+def fill_range(*day_maps):
+    years = set()
+    for m in day_maps:
+        years |= set(m)
+    if not years:
+        return {}
+    lo, hi = min(years), max(years)
+    return {y: day_maps[0].get(y, 0) for y in range(lo, hi + 1)}
 
 
 # ---------------------------------------------------------------------
-# Threshold (Sec 6(1) + Explanation 1) -> (threshold_days, only_182)
+# Section 6(1) threshold for a year, including Explanation 1
 # ---------------------------------------------------------------------
-def basic_threshold(is_citizen, is_pio, is_visit, income_15l, emp, is_crew):
-    if is_crew:
-        return 182, True
-    if emp and is_citizen:
-        return 182, True
-    if (is_citizen or is_pio) and is_visit:
-        return (120, False) if income_15l else (182, True)
-    return 60, False
+def basic_threshold(y, is_citizen, is_pio, f):
+    """Returns (threshold, only_182, note). only_182 means limb 6(1)(b) is
+    effectively replaced by 182 days, so only 182+ days makes a person resident."""
+    sit = f.get("sit", SIT_NORMAL)
+    if sit in (SIT_EMP, SIT_CREW):
+        if is_citizen:
+            return 182, True, SIT_SHORT[sit]
+        return 60, False, "Expl.1(a) not applied: only for citizens"
+    if sit == SIT_VISIT:
+        if is_citizen or is_pio:
+            if y >= AMENDMENT_2020 and f.get("inc15"):
+                return 120, False, "Expl.1(b) visit, Indian income > Rs.15L"
+            return 182, True, SIT_SHORT[sit]
+        return 60, False, "Expl.1(b) not applied: only for citizens/PIO"
+    return 60, False, ""
 
 
 # ---------------------------------------------------------------------
-# CORE ENGINE — classify a contiguous dict of {year: days}
+# CORE ENGINE
 # ---------------------------------------------------------------------
-def classify_years(full_days, emp_years, is_citizen, is_pio, is_visit,
-                   income_15l, not_taxed, is_crew, prior_status, prior_days, prior_map=None):
+def classify_years(full_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map=None):
+    """full_days: contiguous {fy_start_year: days}. flags: {year: {sit, inc15, notax}}.
+    prior_status/prior_days: assumption for years before the data;
+    prior_map: {year: {status, days}} entered for preceding years (overrides the assumption)."""
     residency, reasons = {}, {}
     prior_map = prior_map or {}
-    default_res = "Non-Resident" if prior_status == "Non-Resident" else "Resident Ordinarily Resident (ROR)"
-
-    def _norm(s):
-        return "Non-Resident" if str(s) == "Non-Resident" else "Resident Ordinarily Resident (ROR)"
+    default_res = STATUS_NR if prior_status == "Non-Resident" else STATUS_ROR
 
     def days_in(y):
         if y in full_days:
@@ -124,103 +289,97 @@ def classify_years(full_days, emp_years, is_citizen, is_pio, is_visit,
         if y in residency:
             return residency[y][0]
         if y in prior_map:
-            return _norm(prior_map[y]["status"])
+            return STATUS_NR if prior_map[y]["status"] == "Non-Resident" else STATUS_ROR
         return default_res
 
     for y in sorted(full_days):
         days = full_days[y]
-        emp = y in emp_years
-        threshold, only_182 = basic_threshold(is_citizen, is_pio, is_visit, income_15l, emp, is_crew)
+        f = flags.get(y, {})
+        threshold, only_182, note = basic_threshold(y, is_citizen, is_pio, f)
+        tag = f"[{note}] " if note else ""
         prior4 = sum(days_in(y - i) for i in range(1, 5))
-        deemed = is_citizen and income_15l and not_taxed
+        new_rules = y >= AMENDMENT_2020
 
-        is_res = days >= 182 if only_182 else (days >= 182 or (days >= threshold and prior4 >= 365))
+        if only_182:
+            is_res = days >= 182
+        else:
+            is_res = days >= 182 or (days >= threshold and prior4 >= 365)
 
-        # ---- Not resident under 6(1) ----
         if not is_res:
-            if deemed:
-                residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
-                reasons[y] = "Deemed Resident u/s 6(1A) -> RNOR [6(6)(d)]: citizen, Indian income >Rs.15L, not taxed abroad"
+            if new_rules and is_citizen and f.get("inc15") and f.get("notax"):
+                residency[y] = (STATUS_RNOR, days)
+                reasons[y] = (f"{tag}Deemed resident u/s 6(1A): citizen, Indian income > Rs.15L, "
+                              f"not liable to tax abroad -> RNOR [6(6)(d)]")
+                continue
+            if days == 0:
+                rs = "0 days in India"
+            elif only_182:
+                rs = f"{days} days < 182"
+            elif days >= threshold:
+                rs = f"{days} days >= {threshold} but prior 4 FYs {prior4} < 365"
             else:
-                if days == 0:
-                    rs = "0 days in India"
-                elif (not only_182) and days >= threshold:
-                    rs = f"{days} days >= {threshold} but prior 4 FYs = {prior4} < 365"
-                else:
-                    lim = 182 if only_182 else threshold
-                    rs = f"{days} days < {lim}"
-                residency[y] = ("Non-Resident", days)
-                reasons[y] = rs
+                rs = f"{days} days < {threshold}"
+            residency[y] = (STATUS_NR, days)
+            reasons[y] = tag + rs
             continue
 
-        # ---- Resident under 6(1) ----
-        base = (f"{days} days >= 182 [Sec 6(1)(a)]" if days >= 182
-                else f"{days} days >= {threshold} & prior 4 FYs {prior4} >= 365 [Sec 6(1)(b)]")
-
+        base = (f"{days} days >= 182 [6(1)(a)]" if days >= 182
+                else f"{days} days >= {threshold} & prior 4 FYs {prior4} >= 365 [6(1)(c)]")
         prior7 = sum(days_in(x) for x in range(y - 7, y))
         nr_count = sum(1 for x in range(y - 10, y) if is_nonresident(status_of(x)))
         rnor_a = nr_count >= 9
         rnor_b = prior7 <= 729
-        rnor_c = (is_citizen or is_pio) and is_visit and income_15l and 120 <= days < 182
+        rnor_c = (new_rules and (is_citizen or is_pio) and f.get("sit") == SIT_VISIT
+                  and f.get("inc15") and 120 <= days < 182)
 
         if rnor_a or rnor_b or rnor_c:
             parts = []
-            if rnor_a: parts.append(f"NR in {nr_count}/10 prior FYs [6(6)(a)]")
-            if rnor_b: parts.append(f"<=729 days in prior 7 FYs (={prior7}) [6(6)(b)]")
-            if rnor_c: parts.append("120-181 days visitor/PIO >Rs.15L [6(6)(c)]")
-            residency[y] = ("Resident but Not Ordinarily Resident (RNOR)", days)
-            reasons[y] = f"{base} -> RNOR ({' | '.join(parts)})"
+            if rnor_a:
+                parts.append(f"NR in {nr_count}/10 prior FYs [6(6)(a)]")
+            if rnor_b:
+                parts.append(f"{prior7} days in prior 7 FYs <= 729 [6(6)(a)]")
+            if rnor_c:
+                parts.append("visitor with Indian income > Rs.15L, 120-181 days [6(6)(c)]")
+            residency[y] = (STATUS_RNOR, days)
+            reasons[y] = f"{tag}{base} -> RNOR ({' | '.join(parts)})"
         else:
-            residency[y] = ("Resident Ordinarily Resident (ROR)", days)
-            reasons[y] = f"{base} -> ROR"
+            residency[y] = (STATUS_ROR, days)
+            reasons[y] = (f"{tag}{base} -> ROR (NR in {nr_count}/10 prior FYs; "
+                          f"{prior7} days in prior 7 FYs)")
     return residency, reasons
 
 
-def fill_range(days_by_year):
-    """Return contiguous {year: days} between min & max year, filling gaps with 0."""
-    if not days_by_year:
-        return {datetime.now().year - 1: 0}
-    lo, hi = min(days_by_year), max(days_by_year)
-    return {y: days_by_year.get(y, 0) for y in range(lo, hi + 1)}
+def run_all(full_days, max_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map):
+    """Main result plus the sensitivity scenarios."""
+    residency, reasons = classify_years(full_days, flags, is_citizen, is_pio,
+                                        prior_status, prior_days, prior_map)
+    scen = {}
+    scen["If resident in prior years"] = classify_years(
+        full_days, flags, is_citizen, is_pio, "Resident", 182)[0]
+    scen["If non-resident in prior years"] = classify_years(
+        full_days, flags, is_citizen, is_pio, "Non-Resident", 0)[0]
+    if any(f.get("sit", SIT_NORMAL) != SIT_NORMAL for f in flags.values()):
+        plain = {y: {**f, "sit": SIT_NORMAL} for y, f in flags.items()}
+        scen["Plain 60-day rule (no Expl. 1)"] = classify_years(
+            full_days, plain, is_citizen, is_pio, prior_status, prior_days, prior_map)[0]
+    if max_days and any(max_days.get(y, 0) != full_days.get(y, 0) for y in full_days):
+        mx = {y: max_days.get(y, 0) for y in full_days}
+        scen["If missing stays were spent in India"] = classify_years(
+            mx, flags, is_citizen, is_pio, prior_status, prior_days, prior_map)[0]
 
-
-# ---------------------------------------------------------------------
-# Build day-counts from arrival/departure dates
-# ---------------------------------------------------------------------
-def days_from_dates(arr_str, dep_str, smart):
-    arrs, arr_inv = parse_dates(arr_str)
-    deps, dep_inv = parse_dates(dep_str)
-    paired, match_log = smart_pair(arrs, deps) if smart else (list(zip(arrs, deps)), [])
-    fy_days = defaultdict(int)
-    fy_trips = defaultdict(list)
-    warnings, seen = [], set()
-    for i, (a, d) in enumerate(paired):
-        if not a or not d:
-            if a or d: warnings.append(f"Trip {i+1}: skipped (missing pair)")
-            continue
-        if a > d:
-            warnings.append(f"Trip {i+1}: invalid (arrival > departure)")
-            continue
-        trip = f"Trip {i+1}: {a.strftime('%d/%m/%Y')} -> {d.strftime('%d/%m/%Y')} ({(d-a).days+1} days)"
-        cur = a
-        while cur <= d:
-            fy = fy_of(cur); key = (fy, cur)
-            if key not in seen:
-                fy_days[fy_start_year(cur)] += 1; seen.add(key)
-            fy_trips[fy_start_year(cur)].append(trip)
-            cur += timedelta(days=1)
-    incompletes = [f"Unreadable Arrival Date: {x}" for x in arr_inv]
-    incompletes += [f"Unreadable Departure Date: {x}" for x in dep_inv]
-    incompletes += [m for m in match_log if "NO DEPARTURE" in m or "NO ARRIVAL" in m]
-    return dict(fy_days), dict(fy_trips), warnings, match_log, incompletes
+    sensitive = {}
+    for y in full_days:
+        shown = residency[y][0]
+        alts = {k: v[y][0] for k, v in scen.items()}
+        if any(a != shown for a in alts.values()):
+            sensitive[y] = alts
+    return residency, reasons, sensitive, list(scen)
 
 
 # =====================================================================
 # STREAMLIT UI
 # =====================================================================
-st.set_page_config(page_title="India Tax Residency - Section 6", layout="wide")
-
-st.markdown("""
+CSS = """
 <style>
 #MainMenu {visibility:hidden;} footer {visibility:hidden;}
 .block-container {padding-top:1.4rem; max-width:1200px;}
@@ -233,338 +392,159 @@ st.markdown("""
 .hero .by  {color:#93b9cc;font-size:.8rem;margin-top:.5rem;}
 div[data-testid="stMetricValue"] {font-size:1.4rem;}
 .stButton>button {border-radius:10px;font-weight:600;}
-.badge {display:inline-block;padding:3px 10px;border-radius:999px;font-size:.8rem;font-weight:600;}
 </style>
-""", unsafe_allow_html=True)
+"""
 
-st.markdown("""
+HERO = """
 <div class="hero">
   <h1>India Tax Residency Calculator</h1>
   <p class="sub">Section 6 &nbsp;·&nbsp; Income-tax Act 1961 (up to FY 2025-26) &amp; Income-tax Act 2025 (FY 2026-27 onward)</p>
-  <p class="sub" style="font-size:.85rem;">Deemed residency 6(1A) &nbsp;·&nbsp; 120-day rule &nbsp;·&nbsp; RNOR 6(6)(a)/(b)/(c) &nbsp;·&nbsp; Crew &nbsp;·&nbsp; Smart pairing</p>
+  <p class="sub" style="font-size:.85rem;">Explanation 1(a)/1(b) year-wise &nbsp;·&nbsp; 120-day rule &nbsp;·&nbsp; Deemed residency 6(1A) &nbsp;·&nbsp; RNOR 6(6) &nbsp;·&nbsp; Missing-record checks</p>
   <p class="by">By Aman Gautam &nbsp;·&nbsp; 8433878823</p>
 </div>
-""", unsafe_allow_html=True)
+"""
 
-with st.expander("How residency is decided — full explanation", expanded=False):
-    st.markdown(
-        "Residential status is decided **separately for every financial year (tax year)** and depends purely on the "
-        "**number of days physically present in India** — not on citizenship, passport or visa. It is settled in two steps.\n\n"
+EXPLAINER = (
+    "Residential status is decided **separately for every financial year** and depends on the "
+    "**number of days physically present in India**.\n\n"
+    "### Step 1 — Resident or Non-Resident? [Section 6(1)]\n"
+    "Resident if **(a)** 182 days or more in the year, **or (c)** 60 days or more in the year **and** "
+    "365 days or more in the 4 preceding years.\n\n"
+    "### Explanation 1 — the 60 days is raised (set year-wise below)\n"
+    "- **1(a)** An **Indian citizen who leaves India in that year** for employment abroad, or as crew of an "
+    "Indian ship: 60 → **182 days**. It applies to the year of leaving. For a seafarer who leaves for a fresh "
+    "contract every year, it can apply to each such year.\n"
+    "- **1(b)** An **Indian citizen or PIO who is based outside India and comes on a visit**: 60 → **182 days**, "
+    "in every year they are based abroad. From **FY 2020-21**, if Indian income (other than foreign-source income) "
+    "exceeds Rs.15 lakh, it is **120 days** instead.\n\n"
+    "### Deemed resident [Section 6(1A)] — from FY 2020-21\n"
+    "An Indian citizen with Indian income above Rs.15 lakh who is not liable to tax in any other country is "
+    "deemed resident, and is always RNOR [6(6)(d)].\n\n"
+    "### Step 2 — ROR or RNOR? [Section 6(6)]\n"
+    "A resident is **RNOR** if NR in **9 of the 10** preceding years, **or** in India for **729 days or less** "
+    "in the 7 preceding years, **or** (from FY 2020-21) a 1(b) visitor resident only under the 120-day rule, "
+    "**or** deemed resident. Otherwise **ROR**.\n\n"
+    "### Counting days\n"
+    "- Both the arrival day and the departure day count.\n"
+    "- Movements are paired in date order. A missing arrival or departure is flagged, and the "
+    "**'If missing stays were spent in India'** check shows whether the gap could change the status.\n"
+    "- A stay with no departure is counted only up to the **'Data available up to'** date you enter.\n"
+    "- Rule 126 (crew voyage days) is not computed automatically."
+)
 
-        "### Step 1 — Resident or Non-Resident? [Section 6(1)]\n"
-        "An individual is **Resident** for the year if **either** basic condition is met:\n"
-        "- **(a)** Present in India for **182 days or more** during the year; **or**\n"
-        "- **(b)** Present in India for **60 days or more** during the year **and** **365 days or more** in the **4 immediately preceding years** taken together.\n\n"
-        "If neither is met, the individual is **Non-Resident (NR)** for that year.\n\n"
+PRIOR_CHOICES = ["— select —", "Resident in all preceding years",
+                 "Non-Resident in all preceding years (0 days)", "Enter each preceding year"]
 
-        "### Exceptions that modify the 60-day limb [Explanation 1 to 6(1)]\n"
-        "For certain people, condition (b)'s 60 days is **raised**, making it harder to become resident:\n"
-        "- **Indian citizen leaving India for employment abroad**, or **as a member of the crew of an Indian ship** — 60 days becomes **182 days**.\n"
-        "- **Indian citizen or PIO living abroad who comes on a visit to India** — 60 days becomes **182 days**; but if their **Indian income (i.e. total income other than foreign-source income) exceeds Rs.15 lakh**, it becomes **120 days** instead. "
-        "Under the 120-day route the person must **also** have 365+ days in the preceding 4 years to be resident.\n\n"
 
-        "### Deemed Resident [Section 6(1A)]\n"
-        "An **Indian citizen** whose **Indian income exceeds Rs.15 lakh** and who is **not liable to tax in any other country** (by reason of domicile, residence or similar) is **deemed resident** even with zero days in India — *unless* they are already resident under 6(1). "
-        "A deemed resident is **always classified RNOR** [via 6(6)(d)].\n\n"
+def build_flags_df(years, days_map, prev):
+    old = {}
+    if prev is not None and len(prev):
+        for _, r in prev.iterrows():
+            old[str(r["FY"])] = r
+    rows = []
+    for y in years:
+        o = old.get(fy_label(y))
+        rows.append({
+            "FY": fy_label(y),
+            "Days": int(days_map.get(y, 0)),
+            COL_SIT: (o[COL_SIT] if o is not None and o[COL_SIT] in SITUATIONS else SIT_NORMAL),
+            COL_INC: bool(o[COL_INC]) if o is not None else False,
+            COL_NOTAX: bool(o[COL_NOTAX]) if o is not None else False,
+        })
+    return pd.DataFrame(rows)
 
-        "### Step 2 — If Resident: Ordinarily (ROR) or Not Ordinarily Resident (RNOR)? [Section 6(6)]\n"
-        "A resident is **RNOR** if **any** of these apply (otherwise they are **ROR**):\n"
-        "- **(a)** Non-Resident in **9 out of the 10** immediately preceding years; **or**\n"
-        "- **(b)** Present in India for **729 days or less** across the **7 immediately preceding years**; **or**\n"
-        "- **(c)** An Indian citizen / PIO **visitor with Indian income > Rs.15 lakh** who is resident only because of the **120-day** rule (i.e. 120–181 days that year); **or**\n"
-        "- **(d)** A person who is **deemed resident** under 6(1A).\n\n"
-        "RNOR is a transitional status — typically the first year or two after a long-term NRI returns to India.\n\n"
 
-        "### Why the classification matters (scope of tax)\n"
-        "- **ROR** — taxed on **global income** (Indian + foreign).\n"
-        "- **RNOR** — taxed on **Indian income**, plus foreign income only if it is from a **business controlled from / profession set up in India**; other foreign income is exempt.\n"
-        "- **Non-Resident** — taxed only on income **received, accruing or arising in India**.\n\n"
+def year_flags_editor(years, days_map):
+    ss = st.session_state
+    sig = tuple((y, days_map.get(y, 0)) for y in years)
+    if ss.get("yf_sig") != sig:
+        ss["yf_base"] = build_flags_df(years, days_map, ss.get("yf_current"))
+        ss["yf_sig"] = sig
+        ss["yf_ver"] = ss.get("yf_ver", 0) + 1
 
-        "### Counting the days\n"
-        "- Both the **day of arrival and the day of departure** count as days in India.\n"
-        "- Days are counted per financial year; a single stay spanning **31 March / 1 April** is split across the two years.\n"
-        "- The **60+365**, **729-day** and **9-of-10** tests look at **preceding** years — that is exactly what the *Preceding years* box below supplies when your data does not cover them.\n"
-        "- For an Indian-citizen crew member, **Rule 126** excludes eligible-voyage days from the count. This tool applies the 182-day rule for crew but does **not** auto-compute the Rule 126 exclusion.\n\n"
+    labels = [fy_label(y) for y in years]
+    with st.expander("Quick fill a range of years", expanded=False):
+        q1, q2, q3 = st.columns([1, 1, 2])
+        f_from = q1.selectbox("From FY", labels, index=0, key="qf_from")
+        f_to = q2.selectbox("To FY", labels, index=len(labels) - 1, key="qf_to")
+        f_sit = q3.selectbox("Situation", SITUATIONS, index=3, key="qf_sit")
+        if st.button("Apply to range"):
+            lo, hi = int(f_from[:4]), int(f_to[:4])
+            if lo > hi:
+                lo, hi = hi, lo
+            df = (ss.get("yf_current") if ss.get("yf_current") is not None else ss["yf_base"]).copy()
+            mask = df["FY"].str[:4].astype(int).between(lo, hi)
+            df.loc[mask, COL_SIT] = f_sit
+            ss["yf_base"] = build_flags_df(years, days_map, df)
+            ss["yf_ver"] += 1
+            st.rerun()
 
-        "### Which Act applies\n"
-        "The **Income-tax Act, 2025** carries these tests forward **unchanged** and governs tax years beginning **on or after 1 April 2026 (FY 2026-27)**. "
-        "**FY 2025-26 and earlier** remain under the **Income-tax Act, 1961** (savings clause). The **9-of-10** and **729-day** look-back tests still reach into years that were governed by the old Act. "
-        "Because the day-count logic is identical, the result is the same whichever Act applies.\n\n"
-
-        
+    edited = st.data_editor(
+        ss["yf_base"], hide_index=True, **WIDE,
+        key=f"yf_editor_{ss['yf_ver']}", disabled=["FY", "Days"],
+        column_config={
+            "FY": st.column_config.TextColumn("FY", width="small"),
+            "Days": st.column_config.NumberColumn("Days in India", width="small"),
+            COL_SIT: st.column_config.SelectboxColumn(COL_SIT, options=SITUATIONS, required=True, width="large"),
+            COL_INC: st.column_config.CheckboxColumn(COL_INC, help="Total income other than foreign-source income "
+                                                     "exceeds Rs.15 lakh (relevant from FY 2020-21)"),
+            COL_NOTAX: st.column_config.CheckboxColumn(COL_NOTAX, help="Citizen not liable to tax in any other "
+                                                       "country — for deemed residency u/s 6(1A)"),
+        },
     )
+    ss["yf_current"] = edited
+    flags = {}
+    for _, r in edited.iterrows():
+        y = int(str(r["FY"])[:4])
+        flags[y] = {"sit": r[COL_SIT] if r[COL_SIT] in SITUATIONS else SIT_NORMAL,
+                    "inc15": bool(r[COL_INC]), "notax": bool(r[COL_NOTAX])}
+    return flags, edited
 
-for k in ["results", "selected_fy"]:
-    st.session_state.setdefault(k, None)
-
-# ------------------------------------------------------------------ #
-# 1) INPUT METHOD
-# ------------------------------------------------------------------ #
-mode = st.radio("Input method", ["Arrival / Departure dates", "FY + Days (direct entry)"],
-                horizontal=True)
-
-full_days_input = {}     # {year: days}
-fy_trips = {}
-warns_list, match_log, incompletes = [], [], []
-smart = True
-
-with st.container(border=True):
-    if mode == "Arrival / Departure dates":
-        c1, c2 = st.columns(2)
-        with c1:
-            arr = st.text_area("Arrival Dates", height=190,
-                               placeholder="01/04/2024  15/07/2024  10/01/2025",
-                               help="Space / comma / newline separated. DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD")
-        with c2:
-            dep = st.text_area("Departure Dates", height=190,
-                               placeholder="10/06/2024  20/08/2024  25/01/2025")
-        smart = st.checkbox("Enable Smart Pairing (recommended)", value=True,
-                            help="Auto-matches each arrival to the earliest valid departure on/after it")
-        fyd, fy_trips, warns_list, match_log, incompletes = days_from_dates(arr, dep, smart)
-        full_days_input = fyd
-    else:
-        st.caption("Enter the financial year and total days in India for each year. Add rows as needed.")
-        seed = pd.DataFrame({"FY": ["2024-2025"], "Days": [0]})
-        edited = st.data_editor(
-            seed, num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={
-                "FY": st.column_config.TextColumn("FY", help="e.g. 2024-2025 or 2024-25 or 2024", width="medium"),
-                "Days": st.column_config.NumberColumn("Days in India", min_value=0, max_value=366, step=1, width="small"),
-            },
-            key="fy_editor",
-        )
-        for _, row in edited.iterrows():
-            m = re.match(r"\s*(\d{4})", str(row.get("FY", "")))
-            if not m:
-                continue
-            y = int(m.group(1))
-            try:
-                d = int(row.get("Days") or 0)
-            except (ValueError, TypeError):
-                d = 0
-            full_days_input[y] = full_days_input.get(y, 0) + max(0, min(366, d))
-
-# Reactive FY range for downstream controls
-if full_days_input:
-    detected_min = min(full_days_input)
-    detected_max = max(full_days_input)
-    fy_list_reactive = [fy_label(y) for y in range(detected_min, detected_max + 1)]
-else:
-    detected_min = detected_max = None
-    fy_list_reactive = []
-
-# ------------------------------------------------------------------ #
-# 2) TAXPAYER PROFILE
-# ------------------------------------------------------------------ #
-with st.container(border=True):
-    st.subheader("Taxpayer profile")
-    taxpayer_type = st.radio("Taxpayer type",
-                             ["Indian Citizen", "Person of Indian Origin (PIO)", "Foreign Citizen (neither)"],
-                             index=0, horizontal=True)
-    is_citizen = taxpayer_type == "Indian Citizen"
-    is_pio = taxpayer_type == "Person of Indian Origin (PIO)"
-
-    p1, p2 = st.columns(2)
-    with p1:
-        is_visit = st.checkbox("Coming on a visit to India from outside", value=False)
-        income_15l = st.checkbox("Indian income (excl. foreign) > Rs.15 Lakh", value=False)
-    with p2:
-        not_taxed = st.checkbox("Not liable to tax in any foreign country", value=False,
-                                disabled=not is_citizen, help="Required for Deemed Residency u/s 6(1A)")
-        is_crew = st.checkbox("Crew member of Indian ship (employment)", value=False,
-                              help="Applies the 182-day rule. Rule 126 voyage-day exclusion is not auto-computed.")
-
-# ------------------------------------------------------------------ #
-# 3) PRIOR YEARS + EMPLOYMENT  (simple, non per-year)
-# ------------------------------------------------------------------ #
-with st.container(border=True):
-    st.subheader("Preceding years & employment")
-    e_left, e_right = st.columns(2)
-    with e_left:
-        prior_choice = st.selectbox(
-            "Residential status in ALL preceding years",
-            ["— select —", "Resident in all preceding years", "Non-Resident (enter each year)"],
-            index=0,
-            help="Required. Drives the 365-day, 729-day and 9-of-10-year tests.")
-    with e_right:
-        emp_fys = st.multiselect("Employment-abroad FYs", options=fy_list_reactive,
-                                 help="FYs the assessee was employed outside India (182-day rule applies)")
-
-    prior_status, prior_days, prior_map = None, 0, {}
-    if prior_choice == "Resident in all preceding years":
-        prior_status, prior_days = "Resident", 182
-        st.caption("Assuming ordinarily resident throughout the preceding years.")
-    elif prior_choice.startswith("Non-Resident"):
-        prior_status, prior_days = "Non-Resident", 0
-        if detected_min is not None:
-            st.caption("Enter each preceding year's status and days in India. "
-                       "These feed the 365-day (last 4 FYs), 729-day (last 7 FYs) and 9-of-10-year tests.")
-            pri_years = list(range(detected_min - 10, detected_min))
-            seed = pd.DataFrame({
-                "FY": [fy_label(y) for y in pri_years],
-                "Status": ["Non-Resident"] * len(pri_years),
-                "Days": [0] * len(pri_years),
-            })
-            edited_prior = st.data_editor(
-                seed, hide_index=True, use_container_width=True,
-                column_config={
-                    "FY": st.column_config.TextColumn("FY", disabled=True, width="small"),
-                    "Status": st.column_config.SelectboxColumn(
-                        "Status", options=["Non-Resident", "Resident"], width="medium"),
-                    "Days": st.column_config.NumberColumn(
-                        "Days in India", min_value=0, max_value=366, step=1, width="small"),
-                },
-                key=f"prior_editor_{detected_min}",
-            )
-            for _, row in edited_prior.iterrows():
-                mm = re.match(r"(\d{4})", str(row["FY"]))
-                if mm:
-                    yy = int(mm.group(1))
-                    try:
-                        dd = int(row["Days"] or 0)
-                    except (ValueError, TypeError):
-                        dd = 0
-                    prior_map[yy] = {"status": row["Status"], "days": max(0, min(366, dd))}
-        else:
-            st.info("Enter trip / FY data above to list the preceding years.")
-
-# ------------------------------------------------------------------ #
-# 4) ACTIONS
-# ------------------------------------------------------------------ #
-b1, b2 = st.columns(2)
-calculate = b1.button("Calculate residency", type="primary", use_container_width=True)
-clear = b2.button("Clear results", use_container_width=True)
-
-if clear:
-    st.session_state.results = None
-    st.session_state.selected_fy = None
-    st.rerun()
-
-if calculate:
-    if not full_days_input:
-        st.error("No data yet — enter dates (or FY + Days) first.")
-    elif prior_choice == "— select —":
-        st.error("Please choose the residential status in the preceding years first.")
-    else:
-        with st.spinner("Applying Section 6 rules..."):
-            try:
-                full_days = fill_range(full_days_input)
-                emp_years = {int(fy.split('-')[0]) for fy in emp_fys}
-
-                def _classify(ps, pd, pm=None):
-                    return classify_years(
-                        full_days, emp_years, is_citizen, is_pio, is_visit,
-                        income_15l, not_taxed, is_crew, ps, pd, pm)
-
-                residency, reasons = _classify(prior_status, int(prior_days), prior_map)
-
-                # Sensitivity: pure extreme prior-year histories (map-free)
-                res_hi, _ = _classify("Resident", 182)
-                res_lo, _ = _classify("Non-Resident", 0)
-                sensitive = {}
-                for y in full_days:
-                    hi, lo = res_hi[y][0], res_lo[y][0]
-                    if hi != lo:
-                        sensitive[y] = (hi, lo)
-
-                st.session_state.results = {
-                    "full_days": full_days, "residency": residency, "reasons": reasons,
-                    "total": sum(full_days_input.values()),
-                    "warns": "\n".join(warns_list), "fy_trips": fy_trips,
-                    "match_log": match_log, "incompletes": incompletes,
-                    "prior_status": prior_status, "prior_days": int(prior_days),
-                    "prior_choice": prior_choice, "prior_map": dict(prior_map),
-                    "sensitive": sensitive, "mode": mode,
-                    "profile": {
-                        "type": taxpayer_type, "visit": is_visit, "income_15l": income_15l,
-                        "not_taxed": not_taxed, "crew": is_crew, "emp": list(emp_fys),
-                        "smart": smart,
-                    },
-                }
-                st.session_state.selected_fy = None
-                st.rerun()
-            except Exception as e:
-                st.error(f"Calculation error: {e}")
-
-# ------------------------------------------------------------------ #
-# 5) RESULTS
-# ------------------------------------------------------------------ #
-STATUS_STYLE = {
-    "Non-Resident": ("#e8eef7", "#1e3a5f"),
-    "Resident Ordinarily Resident (ROR)": ("#e3f4e1", "#1e5620"),
-    "Resident but Not Ordinarily Resident (RNOR)": ("#fdf0d5", "#7a4b00"),
-}
-
-def short_status(s):
-    if is_nonresident(s):
-        return "NR"
-    if "Not Ordinarily" in s:
-        return "RNOR"
-    if "Ordinarily Resident" in s:
-        return "ROR"
-    return s
-
-def _status_class(s):
-    if is_nonresident(s):
-        return "nr"
-    if "Not Ordinarily" in s:
-        return "rnor"
-    return "ror"
 
 def build_html_report(r, rows):
     now = datetime.now().strftime("%d %B %Y, %I:%M %p")
-    p = r.get("profile", {})
-    prof_bits = [f"Type: {p.get('type','-')}"]
-    if p.get("visit"): prof_bits.append("On a visit to India")
-    if p.get("income_15l"): prof_bits.append("Indian income &gt; Rs.15L")
-    if p.get("not_taxed"): prof_bits.append("Not taxed abroad")
-    if p.get("crew"): prof_bits.append("Crew member")
-    if p.get("emp"): prof_bits.append("Employment-abroad FYs: " + ", ".join(p["emp"]))
-    prof_bits.append(f"Preceding years: {_esc(r.get('prior_choice',''))}")
+    prof = [f"Type: {_esc(r['taxpayer_type'])}", f"Preceding years: {_esc(r['prior_choice'])}"]
+    if r.get("data_from"):
+        prof.append(f"Data from: {fmt(r['data_from'])}")
+    if r.get("data_to"):
+        prof.append(f"Data up to: {fmt(r['data_to'])}")
 
-    table_rows = ""
-    for x in rows:
-        cls = _status_class(x["Status"])
-        table_rows += (f"<tr><td>{_esc(x['FY'])}</td><td class='num'>{x['Days']}</td>"
-                       f"<td class='{cls}'>{_esc(x['Status'])}</td>"
-                       f"<td>{_esc(x['Reason'])}</td></tr>")
+    flag_rows = "".join(
+        f"<tr><td>{_esc(x['FY'])}</td><td>{_esc(x[COL_SIT])}</td>"
+        f"<td>{'Yes' if x[COL_INC] else ''}</td><td>{'Yes' if x[COL_NOTAX] else ''}</td></tr>"
+        for x in r["flags_rows"] if x[COL_SIT] != SIT_NORMAL or x[COL_INC] or x[COL_NOTAX])
+    flags_html = ("<h3>Year-wise circumstances applied</h3><table><thead><tr><th>FY</th><th>Situation</th>"
+                  f"<th>{COL_INC}</th><th>{COL_NOTAX}</th></tr></thead><tbody>{flag_rows}</tbody></table>"
+                  if flag_rows else "")
+
+    table_rows = "".join(
+        f"<tr><td>{_esc(x['FY'])}</td><td class='num'>{x['Days']}</td>"
+        f"<td class='{short_status(x['Status']).lower()}'>{_esc(x['Status'])}</td>"
+        f"<td>{_esc(x['Reason'])}</td></tr>" for x in rows)
 
     sens_html = ""
-    if r.get("sensitive"):
-        sr = ""
+    if r["sensitive"]:
+        heads = "".join(f"<th>{_esc(k)}</th>" for k in r["scen_names"])
+        body = ""
         for y in sorted(r["sensitive"]):
-            hi, lo = r["sensitive"][y]
-            disp = r["residency"].get(y, ("", 0))[0]
-            sr += (f"<tr><td>{_esc(fy_label(y))}</td><td class='num'>{r['full_days'][y]}</td>"
-                   f"<td>{_esc(short_status(disp))}</td><td>{_esc(short_status(hi))}</td>"
-                   f"<td>{_esc(short_status(lo))}</td></tr>")
-        sens_html = (
-            "<h3>Prior-year sensitivity — verify before relying</h3>"
-            "<p>These years change classification depending on the assessee's residency in earlier years. "
-            "The main table uses the selected assumption.</p>"
-            "<table><thead><tr><th>FY</th><th>Days</th><th>Shown</th>"
-            "<th>If resident in prior years</th><th>If non-resident in prior years</th></tr></thead>"
-            f"<tbody>{sr}</tbody></table>")
+            alts = r["sensitive"][y]
+            body += (f"<tr><td>{fy_label(y)}</td><td class='num'>{r['full_days'][y]}</td>"
+                     f"<td>{short_status(r['residency'][y][0])}</td>"
+                     + "".join(f"<td>{short_status(alts[k])}</td>" for k in r["scen_names"]) + "</tr>")
+        sens_html = ("<h3>Sensitivity — verify before relying</h3>"
+                     "<p>These years change classification under the alternative assumptions shown.</p>"
+                     f"<table><thead><tr><th>FY</th><th>Days</th><th>Shown</th>{heads}</tr></thead>"
+                     f"<tbody>{body}</tbody></table>")
 
-    pairing_html = ""
-    if r.get("match_log"):
-        pairing_html = ("<h3>Smart pairing log</h3><pre>" +
-                        _esc("\n".join(r["match_log"])) + "</pre>")
-
-    incomplete_html = ""
-    if r.get("incompletes"):
-        items = "".join(f"<li>{_esc(i)}</li>" for i in r["incompletes"])
-        incomplete_html = f"<h3>Incomplete details — follow up with assessee</h3><ul>{items}</ul>"
-
-    prior_map_html = ""
-    if r.get("prior_map"):
-        pm = "".join(
-            f"<tr><td>{_esc(fy_label(y))}</td><td>{_esc(r['prior_map'][y]['status'])}</td>"
-            f"<td class='num'>{r['prior_map'][y]['days']}</td></tr>"
-            for y in sorted(r["prior_map"]))
-        prior_map_html = ("<h3>Preceding-year data entered</h3>"
-                          "<table><thead><tr><th>FY</th><th>Status</th><th>Days</th></tr></thead>"
-                          f"<tbody>{pm}</tbody></table>")
+    pairing_html = ("<h3>Pairing log</h3><pre>" + _esc("\n".join(r["log"])) + "</pre>") if r["log"] else ""
+    inc_html = ("<h3>Incomplete details — follow up with assessee</h3><ul>"
+                + "".join(f"<li>{_esc(i)}</li>" for i in r["incompletes"]) + "</ul>") if r["incompletes"] else ""
+    prior_html = ""
+    if r["prior_map"]:
+        pm = "".join(f"<tr><td>{fy_label(y)}</td><td>{_esc(v['status'])}</td><td class='num'>{v['days']}</td></tr>"
+                     for y, v in sorted(r["prior_map"].items()))
+        prior_html = ("<h3>Preceding-year data entered</h3><table><thead><tr><th>FY</th><th>Status</th>"
+                      f"<th>Days</th></tr></thead><tbody>{pm}</tbody></table>")
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>India Tax Residency Report</title>
@@ -578,187 +558,304 @@ def build_html_report(r, rows):
  th,td{{border:1px solid #cdd3dd;padding:6px 8px;text-align:left;vertical-align:top;}}
  th{{background:#f1f4f8;}} td.num{{text-align:right;}}
  .nr{{background:#e8eef7;}} .ror{{background:#e3f4e1;}} .rnor{{background:#fdf0d5;}}
- pre{{background:#f6f8fa;border:1px solid #e6e9ef;border-radius:6px;padding:10px;font-size:11px;
-      white-space:pre-wrap;}}
- .foot{{margin-top:26px;color:#7a8797;font-size:11px;border-top:1px solid #e6e9ef;padding-top:8px;}}
+ pre{{background:#f6f8fa;border:1px solid #e6e9ef;border-radius:6px;padding:10px;font-size:11px;white-space:pre-wrap;}}
  @media print{{ body{{margin:12mm;}} }}
 </style></head><body>
 <h1>India Tax Residency Report</h1>
 <div class="meta">Section 6 — Income-tax Act 1961 &amp; Income-tax Act 2025 &nbsp;·&nbsp; Generated {now}</div>
 <h3>Taxpayer profile</h3>
-<p>{' &nbsp;·&nbsp; '.join(prof_bits)}</p>
-{prior_map_html}
+<p>{' &nbsp;·&nbsp; '.join(prof)}</p>
+{flags_html}
+{prior_html}
 {pairing_html}
-{incomplete_html}
+{inc_html}
 <h3>Residency by financial year</h3>
 <table><thead><tr><th>FY</th><th>Days</th><th>Status</th><th>Reason</th></tr></thead>
 <tbody>{table_rows}</tbody></table>
 {sens_html}
 <p class="total">Total days in India: {r['total']}</p>
-
 </body></html>"""
 
-if st.session_state.results:
-    r = st.session_state.results
 
-    rows = []
-    for y in sorted(r["full_days"]):
-        status, days = r["residency"].get(y, ("", r["full_days"][y]))
-        rows.append({"FY": fy_label(y), "Days": days, "Status": status,
-                     "Reason": r["reasons"].get(y, "")})
+STATUS_STYLE = {
+    STATUS_NR: ("#e8eef7", "#1e3a5f"),
+    STATUS_ROR: ("#e3f4e1", "#1e5620"),
+    STATUS_RNOR: ("#fdf0d5", "#7a4b00"),
+}
+
+
+def main():
+    st.set_page_config(page_title="India Tax Residency - Section 6", layout="wide")
+    st.markdown(CSS, unsafe_allow_html=True)
+    st.markdown(HERO, unsafe_allow_html=True)
+    with st.expander("How residency is decided — full explanation", expanded=False):
+        st.markdown(EXPLAINER)
+    st.session_state.setdefault("results", None)
+
+    # ---------------- 1) INPUT ----------------
+    mode = st.radio("Input method", ["Arrival / Departure dates", "FY + Days (direct entry)"], horizontal=True)
+    presence = {"days": {}, "max_days": {}, "fy_trips": {}, "log": [], "warns": [], "incompletes": []}
+    sig_parts = [mode]
+    data_from = data_to = None
+
+    with st.container(border=True):
+        if mode == "Arrival / Departure dates":
+            c1, c2 = st.columns(2)
+            arr = c1.text_area("Arrival Dates", height=190, placeholder="01/04/2024  15/07/2024  10/01/2025",
+                               help="Space / comma / newline separated. DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD")
+            dep = c2.text_area("Departure Dates", height=190, placeholder="10/06/2024  20/08/2024  25/01/2025")
+            c3, c4, c5 = st.columns(3)
+            data_from = c3.date_input("Data available from (optional)", value=None, format="DD/MM/YYYY",
+                                      min_value=date(1980, 1, 1), max_value=date(2100, 1, 1),
+                                      help="Start date of the travel record. A first departure with no earlier "
+                                           "arrival is counted from this date.")
+            data_to = c4.date_input("Data available up to", value=None, format="DD/MM/YYYY",
+                                    min_value=date(1980, 1, 1), max_value=date(2100, 1, 1),
+                                    help="End date of the travel record (e.g. NATGRID report date). A last arrival "
+                                         "with no departure is counted till this date.")
+            chrono = c5.radio("Pairing", ["Chronological (recommended)", "Row by row as entered"], index=0) \
+                .startswith("Chrono")
+            presence = compute_presence(arr, dep, chrono, data_from, data_to)
+            sig_parts += [arr, dep, str(data_from), str(data_to), str(chrono)]
+        else:
+            st.caption("Enter the financial year and total days in India for each year. Add rows as needed.")
+            edited = st.data_editor(
+                pd.DataFrame({"FY": ["2024-2025"], "Days": [0]}), num_rows="dynamic",
+                **WIDE, hide_index=True, key="fy_editor",
+                column_config={
+                    "FY": st.column_config.TextColumn("FY", help="e.g. 2024-2025, 2024-25 or 2024"),
+                    "Days": st.column_config.NumberColumn("Days in India", min_value=0, max_value=366, step=1),
+                })
+            days = {}
+            for _, row in edited.iterrows():
+                m = re.match(r"\s*(\d{4})", str(row.get("FY", "")))
+                if not m:
+                    continue
+                try:
+                    d = int(float(row.get("Days")))
+                except (ValueError, TypeError):
+                    d = 0
+                y = int(m.group(1))
+                days[y] = days.get(y, 0) + max(0, min(366, d))
+            for y, d in days.items():
+                if d > 366:
+                    presence["warns"].append(f"{fy_label(y)}: entered days exceed 366")
+            presence["days"] = {y: min(d, 366) for y, d in days.items()}
+            sig_parts.append(edited.to_json())
+
+    full_days = fill_range(presence["days"], presence["max_days"])
+    years = sorted(full_days)
+
+    # ---------------- 2) PROFILE ----------------
+    with st.container(border=True):
+        st.subheader("Taxpayer profile")
+        taxpayer_type = st.radio("Taxpayer type", ["Indian Citizen", "Person of Indian Origin (PIO)",
+                                                   "Foreign Citizen (neither)"], horizontal=True)
+        is_citizen = taxpayer_type == "Indian Citizen"
+        is_pio = taxpayer_type == "Person of Indian Origin (PIO)"
+        sig_parts.append(taxpayer_type)
+
+    # ---------------- 3) YEAR-WISE CIRCUMSTANCES ----------------
+    flags, flags_df = {}, pd.DataFrame()
+    with st.container(border=True):
+        st.subheader("Year-wise circumstances")
+        st.caption("Set the situation for each year. Use **Based abroad, came on visit(s)** for every year an "
+                   "NRI/seafarer lived abroad and visited India, and **Left India for employment** for the year "
+                   "they left. Years left on the 60-day rule are treated as an ordinary resident would be.")
+        if years:
+            flags, flags_df = year_flags_editor(years, full_days)
+            sig_parts.append(flags_df.to_json())
+            if not is_citizen and not is_pio and any(f["sit"] != SIT_NORMAL for f in flags.values()):
+                st.info("Explanation 1 applies only to Indian citizens (and PIOs for 1(b)); "
+                        "for a foreign citizen these settings are ignored.")
+        else:
+            st.info("Enter dates or FY + days above to list the years.")
+
+    # ---------------- 4) PRECEDING YEARS ----------------
+    prior_status, prior_days, prior_map = None, 0, {}
+    with st.container(border=True):
+        st.subheader("Preceding years")
+        prior_choice = st.selectbox("Residential status in the years before the data", PRIOR_CHOICES,
+                                    help="Drives the 365-day (4 years), 729-day (7 years) and 9-of-10 tests for the "
+                                         "early years.")
+        sig_parts.append(prior_choice)
+        if prior_choice == PRIOR_CHOICES[1]:
+            prior_status, prior_days = "Resident", 182
+            st.caption("Assumes resident with 182 days in each earlier year.")
+        elif prior_choice == PRIOR_CHOICES[2]:
+            prior_status, prior_days = "Non-Resident", 0
+        elif prior_choice == PRIOR_CHOICES[3]:
+            prior_status, prior_days = "Non-Resident", 0
+            if years:
+                pri_years = list(range(years[0] - 10, years[0]))
+                edited_prior = st.data_editor(
+                    pd.DataFrame({"FY": [fy_label(y) for y in pri_years],
+                                  "Status": ["Non-Resident"] * 10, "Days": [0] * 10}),
+                    hide_index=True, **WIDE, key=f"prior_editor_{years[0]}",
+                    column_config={
+                        "FY": st.column_config.TextColumn("FY", disabled=True),
+                        "Status": st.column_config.SelectboxColumn("Status", options=["Non-Resident", "Resident"],
+                                                                   required=True),
+                        "Days": st.column_config.NumberColumn("Days in India", min_value=0, max_value=366, step=1),
+                    })
+                for _, row in edited_prior.iterrows():
+                    try:
+                        dd = int(float(row["Days"]))
+                    except (ValueError, TypeError):
+                        dd = 0
+                    prior_map[int(str(row["FY"])[:4])] = {"status": row["Status"] or "Non-Resident",
+                                                          "days": max(0, min(366, dd))}
+                bad = [fy_label(y) for y, v in prior_map.items() if v["status"] == "Resident" and v["days"] < 60]
+                if bad:
+                    st.warning("Marked Resident with fewer than 60 days: " + ", ".join(bad))
+                sig_parts.append(edited_prior.to_json())
+            else:
+                st.info("Enter trip / FY data above to list the preceding years.")
+
+    sig = hashlib.md5("|".join(sig_parts).encode()).hexdigest()
+
+    # ---------------- ACTIONS ----------------
+    b1, b2 = st.columns(2)
+    calculate = b1.button("Calculate residency", type="primary", **WIDE)
+    if b2.button("Clear results", **WIDE):
+        st.session_state.results = None
+        st.rerun()
+
+    if calculate:
+        if not years or not any(full_days.values()):
+            st.error("No data yet — enter dates (or FY + Days) first.")
+        elif prior_choice == PRIOR_CHOICES[0]:
+            st.error("Please choose the residential status in the preceding years first.")
+        else:
+            residency, reasons, sensitive, scen_names = run_all(
+                full_days, presence["max_days"], flags, is_citizen, is_pio, prior_status, prior_days, prior_map)
+            st.session_state.results = {
+                "sig": sig, "full_days": full_days, "residency": residency, "reasons": reasons,
+                "sensitive": sensitive, "scen_names": scen_names,
+                "total": sum(full_days.values()), "warns": presence["warns"], "fy_trips": presence["fy_trips"],
+                "log": presence["log"], "incompletes": presence["incompletes"],
+                "prior_choice": prior_choice, "prior_map": prior_map, "mode": mode,
+                "taxpayer_type": taxpayer_type, "data_from": data_from, "data_to": data_to,
+                "flags_rows": flags_df.to_dict("records") if len(flags_df) else [],
+            }
+            st.rerun()
+
+    r = st.session_state.results
+    if not r:
+        st.info("Fill in the inputs above and click **Calculate residency**.")
+        return
+    if r["sig"] != sig:
+        st.warning("Inputs have changed since this result was calculated — click **Calculate residency** again.")
+
+    rows = [{"FY": fy_label(y), "Days": r["full_days"][y], "Status": r["residency"][y][0],
+             "Reason": r["reasons"][y]} for y in sorted(r["full_days"])]
     df = pd.DataFrame(rows)
 
-    # ---- summary metrics ----
-    latest = rows[-1] if rows else {"Status": "-", "FY": "-"}
     m1, m2, m3 = st.columns(3)
-    with m1:
-        with st.container(border=True):
-            st.metric("Total days in India", r["total"])
-    with m2:
-        with st.container(border=True):
-            st.metric(f"Latest FY ({latest['FY']})", latest["Status"] or "-")
-    with m3:
-        with st.container(border=True):
-            st.metric("Years analysed", len(rows))
+    with m1, st.container(border=True):
+        st.metric("Total days in India", r["total"])
+    with m2, st.container(border=True):
+        st.metric(f"Latest FY ({rows[-1]['FY']})", short_status(rows[-1]["Status"]))
+    with m3, st.container(border=True):
+        st.metric("Years analysed", len(rows))
 
-    if r["mode"].startswith("Arrival") and r["match_log"]:
-        with st.expander("Smart pairing matches", expanded=False):
-            st.code("\n".join(r["match_log"]), language="text")
-
+    if r["log"]:
+        with st.expander("Pairing log", expanded=False):
+            st.code("\n".join(r["log"]), language="text")
     if r["warns"]:
-        st.warning(f"Warnings:\n{r['warns']}")
-
+        st.warning("**Warnings**\n\n" + "\n".join(f"- {w}" for w in r["warns"]))
     if r["incompletes"]:
         with st.expander("Incomplete details — follow up with assessee", expanded=True):
             for inc in r["incompletes"]:
                 st.write(f"- {inc}")
 
-    # ---- prior-year sensitivity ----
-    if r.get("sensitive"):
-        assumed = ("Resident throughout the preceding years"
-                   if r["prior_status"] == "Resident"
-                   else f"Non-Resident, {r['prior_days']} day(s)/year in preceding years")
-        core_flip = any(
-            (is_nonresident(hi) != is_nonresident(lo))
-            for hi, lo in r["sensitive"].values()
-        )
-        st.warning(
-            f"**Prior-year sensitivity — confirm before relying on this.** "
-            f"The FY(s) below change classification depending on the assessee's residency in earlier years. "
-            f"The table uses your assumption (**{assumed}**). "
-            + ("**At least one year's core Resident/Non-Resident determination flips**, "
-               "so the entire scope of taxation is at stake — verify the actual prior-year day counts. "
-               if core_flip else
-               "The split is between ROR and RNOR (which foreign income is taxable), not the core status. ")
-            + "If your assumption is wrong, switch the **Status in ALL preceding years** control (and enter days) to the true history."
-        )
+    if r["sensitive"]:
+        st.warning("**Sensitivity — confirm before relying on this.** The years below change classification under "
+                   "at least one alternative assumption. The main table uses your inputs.")
         srows = []
         for y in sorted(r["sensitive"]):
-            hi, lo = r["sensitive"][y]
-            disp = r["residency"].get(y, ("", 0))[0]
-            srows.append({
-                "FY": fy_label(y),
-                "Days": r["full_days"][y],
-                "Shown (your assumption)": short_status(disp),
-                "If resident in prior years": short_status(hi),
-                "If non-resident in prior years": short_status(lo),
-            })
-        st.dataframe(pd.DataFrame(srows), use_container_width=True, hide_index=True)
+            row = {"FY": fy_label(y), "Days": r["full_days"][y],
+                   "Shown": short_status(r["residency"][y][0])}
+            row.update({k: short_status(v) for k, v in r["sensitive"][y].items()})
+            srows.append(row)
+        st.dataframe(pd.DataFrame(srows), **WIDE, hide_index=True)
 
-    # ---- colour-coded table ----
     def _row_style(row):
         bg, fg = STATUS_STYLE.get(row["Status"], ("", ""))
         return [f"background-color:{bg}; color:{fg}" if bg else "" for _ in row]
 
-    st.dataframe(
-        df.style.apply(_row_style, axis=1),
-        use_container_width=True, hide_index=True,
-        column_config={
-            "FY": st.column_config.TextColumn(width="small"),
-            "Days": st.column_config.NumberColumn(width="small"),
-            "Status": st.column_config.TextColumn(width="medium"),
-            "Reason": st.column_config.TextColumn(width="large"),
-        },
-    )
+    st.dataframe(df.style.apply(_row_style, axis=1), **WIDE, hide_index=True,
+                 column_config={"Reason": st.column_config.TextColumn(width="large")})
 
-    # ---- trip drill-down (dates mode only) ----
     if r["mode"].startswith("Arrival") and r["fy_trips"]:
-        fy_choice = st.selectbox("View trips counted in FY",
-                                 ["—"] + [fy_label(y) for y in sorted(r["full_days"])])
+        fy_choice = st.selectbox("View stays counted in FY", ["—"] + [x["FY"] for x in rows])
         if fy_choice != "—":
-            y = int(fy_choice.split('-')[0])
-            trips = r["fy_trips"].get(y, [])
+            trips = r["fy_trips"].get(int(fy_choice[:4]), [])
             if trips:
-                st.code("\n".join(sorted(set(trips))), language="text")
+                st.code("\n".join(dict.fromkeys(trips)), language="text")
             else:
                 st.info(f"No stay recorded in {fy_choice}.")
 
-    # ---- copy for Excel (TSV) ----
     st.markdown("**Copy for Excel** — click the copy icon on the box below, then paste into a sheet.")
     tsv = "FY\tDays\tStatus\tReason\n" + "\n".join(
         f"{x['FY']}\t{x['Days']}\t{x['Status']}\t{x['Reason']}" for x in rows)
     st.code(tsv, language="text")
 
-    # ---- downloads ----
     report = "INDIA TAX RESIDENCY REPORT (SECTION 6)\n" + "=" * 60 + "\n"
     report += f"Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}\n" + "-" * 60 + "\n\n"
-    report += f"Preceding-year assumption: {r['prior_status']}, {r['prior_days']} days/year\n\n"
-    if r.get("sensitive"):
-        report += "PRIOR-YEAR SENSITIVITY (verify actual prior-year presence):\n"
+    report += f"Taxpayer: {r['taxpayer_type']} | Preceding years: {r['prior_choice']}\n\n"
+    applied = [x for x in r["flags_rows"] if x[COL_SIT] != SIT_NORMAL or x[COL_INC] or x[COL_NOTAX]]
+    if applied:
+        report += "YEAR-WISE CIRCUMSTANCES:\n" + "\n".join(
+            f"- {x['FY']}: {x[COL_SIT]}{' | Indian income > Rs.15L' if x[COL_INC] else ''}"
+            f"{' | not liable to tax abroad' if x[COL_NOTAX] else ''}" for x in applied) + "\n\n"
+    if r["sensitive"]:
+        report += "SENSITIVITY (verify before relying):\n"
         for y in sorted(r["sensitive"]):
-            hi, lo = r["sensitive"][y]
-            report += (f"- {fy_label(y)}: {short_status(r['residency'][y][0])} as shown | "
-                       f"{short_status(hi)} if resident in prior years | "
-                       f"{short_status(lo)} if non-resident in prior years\n")
+            report += f"- {fy_label(y)}: {short_status(r['residency'][y][0])} as shown | " + " | ".join(
+                f"{k}: {short_status(v)}" for k, v in r["sensitive"][y].items()) + "\n"
         report += "\n"
-    if r["match_log"]:
-        report += "SMART PAIRING LOG:\n" + "\n".join(r["match_log"]) + "\n\n"
+    if r["log"]:
+        report += "PAIRING LOG:\n" + "\n".join(r["log"]) + "\n\n"
     if r["incompletes"]:
-        report += "INCOMPLETE DETAILS (FOLLOW UP WITH ASSESSEE):\n" + \
-                  "\n".join(f"- {i}" for i in r["incompletes"]) + "\n\n"
+        report += "INCOMPLETE DETAILS (FOLLOW UP WITH ASSESSEE):\n" + "\n".join(f"- {i}" for i in r["incompletes"]) + "\n\n"
     report += tsv + f"\n\nTOTAL DAYS IN INDIA: {r['total']}\n"
     report += "Calculator by: Aman Gautam (8433878823)\n"
-    report += "Compliant with Section 6 — Income-tax Act 1961 & Income-tax Act 2025"
 
     html_report = build_html_report(r, rows)
     stamp = datetime.now().strftime("%Y%m%d")
 
     st.markdown("### Report")
-    # One-click print of the full formatted report (opens print dialog)
     b64 = base64.b64encode(html_report.encode("utf-8")).decode()
-    print_btn = f"""
+    components.html(f"""
     <button id="printBtn" style="width:100%;padding:10px 14px;border:0;border-radius:10px;
         background:#203a43;color:#fff;font-weight:600;font-size:14px;cursor:pointer;">
-        Print full report (smart pairing, sensitivity &amp; all)</button>
+        Print full report</button>
     <script>
       const B64 = "{b64}";
       document.getElementById("printBtn").onclick = function() {{
-        const html = decodeURIComponent(escape(atob(B64)));
+        const bytes = Uint8Array.from(atob(B64), c => c.charCodeAt(0));
+        const html = new TextDecoder("utf-8").decode(bytes);
         const w = window.open("", "_blank");
         if (!w) {{ alert("Please allow pop-ups to print, or use the HTML download."); return; }}
         w.document.open(); w.document.write(html); w.document.close();
         w.focus(); setTimeout(function(){{ w.print(); }}, 400);
       }};
-    </script>
-    """
-    components.html(print_btn, height=60)
+    </script>""", height=60)
 
     d1, d2, d3 = st.columns(3)
-    d1.download_button("Report (.txt)", report,
-                       file_name=f"Tax_Residency_{stamp}.txt",
-                       mime="text/plain", use_container_width=True)
-    d2.download_button("Table (.csv)", df.to_csv(index=False),
-                       file_name=f"Tax_Residency_{stamp}.csv",
-                       mime="text/csv", use_container_width=True)
-    d3.download_button("Printable report (.html)", html_report,
-                       file_name=f"Tax_Residency_{stamp}.html",
-                       mime="text/html", use_container_width=True)
-    st.caption("Print opens the full formatted report in a new tab and launches your print dialog "
-               "(choose *Save as PDF* there). If pop-ups are blocked, download the HTML and open it.")
-else:
-    st.info("Fill in the inputs above and click **Calculate residency**.")
+    d1.download_button("Report (.txt)", report, file_name=f"Tax_Residency_{stamp}.txt",
+                       mime="text/plain", **WIDE)
+    d2.download_button("Table (.csv)", df.to_csv(index=False), file_name=f"Tax_Residency_{stamp}.csv",
+                       mime="text/csv", **WIDE)
+    d3.download_button("Printable report (.html)", html_report, file_name=f"Tax_Residency_{stamp}.html",
+                       mime="text/html", **WIDE)
 
-st.markdown(
-    "<p style='text-align:center;color:#8a97a6;font-size:.8rem;margin-top:1.2rem;'>"
-    "Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025  "
-    "Made with care by <b>Aman Gautam</b></p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#8a97a6;font-size:.8rem;margin-top:1.2rem;'>"
+                "Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025 · "
+                "Made with care by <b>Aman Gautam</b></p>", unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()
+    
