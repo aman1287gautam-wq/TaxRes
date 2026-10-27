@@ -22,6 +22,11 @@ except ValueError:
     _ver = (0, 0)
 WIDE = {"width": "stretch"} if _ver >= (1, 50) else {"use_container_width": True}
 
+
+def ic(name):
+    """Material icon argument, only on Streamlit versions that support it."""
+    return {"icon": name} if _ver >= (1, 40) else {}
+
 AMENDMENT_2020 = 2020   # Finance Act 2020: 120-day rule, 6(1A), 6(6)(c)/(d) from FY 2020-21
 
 STATUS_NR = "Non-Resident"
@@ -109,6 +114,10 @@ def compute_presence(arr_text, dep_text, chronological=True, data_from=None, dat
     """Build the set of days the person was certainly in India, plus days that
     may have been in India where a record is missing.
 
+    Returns both counts: "days" treats unrecorded periods as outside India,
+    "max_days" treats them as in India (open-ended stays run to the data
+    start / end dates when given). The user chooses which one drives the table.
+
     Chronological pairing walks all movements in date order:
     an arrival opens a stay, the next departure closes it. Two departures in a
     row mean a missing arrival; two arrivals in a row mean a missing departure.
@@ -186,19 +195,16 @@ def compute_presence(arr_text, dep_text, chronological=True, data_from=None, dat
                         add_span(start, d, certain, lbl)
                         log.append(lbl)
                     elif state is None:
-                        if data_from and data_from <= d:
-                            lbl = (f"Departure {n} ({fmt(d)}) -> NO ARRIVAL; counted from data start "
-                                   f"{fmt(data_from)} | {(d-data_from).days+1} days")
-                            add_span(data_from, d, certain, lbl)
-                            log.append(lbl)
-                            incompletes.append(f"Departure {n} ({fmt(d)}) has no earlier arrival: assumed in India "
-                                               f"from the data start date {fmt(data_from)}")
+                        add_span(d, d, certain, f"Departure {n}: {fmt(d)} (no earlier arrival)")
+                        msg = f"Departure {n} ({fmt(d)}) -> NO ARRIVAL (no record before it)"
+                        log.append(msg)
+                        if data_from and data_from < d:
+                            add_span(data_from, d - timedelta(days=1), maybe)
+                            extra = (f"; {(d - data_from).days} unrecorded day(s) from the data start "
+                                     f"{fmt(data_from)}")
                         else:
-                            add_span(d, d, certain, f"Departure {n}: {fmt(d)} (arrival before data start)")
-                            msg = f"Departure {n} ({fmt(d)}) -> NO ARRIVAL (in India before the data begins)"
-                            log.append(msg)
-                            incompletes.append(f"{msg}: only the departure day is counted. Enter 'Data available "
-                                               f"from' to count the stay from that date")
+                            extra = ""
+                        incompletes.append(f"{msg}: no arrival on record before this date{extra}")
                     else:  # two departures in a row
                         add_span(d, d, certain, f"Departure {n}: {fmt(d)} (arrival missing)")
                         gap = (d - last_dep).days - 1
@@ -211,19 +217,15 @@ def compute_presence(arr_text, dep_text, chronological=True, data_from=None, dat
                     state, last_dep = "out", d
 
     if state == "in":
-        if data_to and data_to >= start:
-            lbl = (f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE; counted till data end "
-                   f"{fmt(data_to)} | {(data_to-start).days+1} days")
-            add_span(start, data_to, certain, lbl)
-            log.append(lbl)
-            incompletes.append(f"Arrival {start_n} ({fmt(start)}) has no later departure: assumed in India "
-                               f"till the data end date {fmt(data_to)}")
+        add_span(start, start, certain, f"Arrival {start_n}: {fmt(start)} (no later departure)")
+        msg = f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE FOUND"
+        log.append(msg)
+        if data_to and data_to > start:
+            add_span(start + timedelta(days=1), data_to, maybe)
+            extra = (f"; {(data_to - start).days} unrecorded day(s) up to the data end {fmt(data_to)}")
         else:
-            add_span(start, start, certain, f"Arrival {start_n}: {fmt(start)} (no departure)")
-            msg = f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE FOUND"
-            log.append(msg)
-            incompletes.append(f"{msg}: only the arrival day is counted. Enter 'Data available up to' "
-                               f"to count the stay till that date")
+            extra = ""
+        incompletes.append(f"{msg}: no departure on record after this date{extra}")
 
     return _presence_result(certain, maybe, fy_trips, log, warns, incompletes)
 
@@ -349,7 +351,15 @@ def classify_years(full_days, flags, is_citizen, is_pio, prior_status, prior_day
     return residency, reasons
 
 
-def run_all(full_days, max_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map):
+MISSING_OUT = "Outside India — count only recorded days"
+MISSING_IN = "In India — count unrecorded periods as days in India"
+ALT_IF_IN = "If missing stays were spent in India"
+ALT_IF_OUT = "If missing stays were outside India"
+
+
+def run_all(full_days, max_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map,
+            alt_label=ALT_IF_IN):
+    """max_days: the alternative day counts for the missing-record check (named for the default case)."""
     """Main result plus the sensitivity scenarios."""
     residency, reasons = classify_years(full_days, flags, is_citizen, is_pio,
                                         prior_status, prior_days, prior_map)
@@ -364,7 +374,7 @@ def run_all(full_days, max_days, flags, is_citizen, is_pio, prior_status, prior_
             full_days, plain, is_citizen, is_pio, prior_status, prior_days, prior_map)[0]
     if max_days and any(max_days.get(y, 0) != full_days.get(y, 0) for y in full_days):
         mx = {y: max_days.get(y, 0) for y in full_days}
-        scen["If missing stays were spent in India"] = classify_years(
+        scen[alt_label] = classify_years(
             mx, flags, is_citizen, is_pio, prior_status, prior_days, prior_map)[0]
 
     sensitive = {}
@@ -381,28 +391,141 @@ def run_all(full_days, max_days, flags, is_citizen, is_pio, prior_status, prior_
 # =====================================================================
 CSS = """
 <style>
-#MainMenu {visibility:hidden;} footer {visibility:hidden;}
-.block-container {padding-top:1.4rem; max-width:1200px;}
-.hero {background:linear-gradient(135deg,#0f2027 0%,#203a43 55%,#2c5364 100%);
-       padding:1.5rem 1.8rem;border-radius:18px;margin-bottom:1.2rem;
-       box-shadow:0 8px 24px rgba(15,32,39,.18);}
-.hero h1 {color:#fff;margin:0;font-size:1.75rem;letter-spacing:.2px;}
-.hero p  {margin:.35rem 0 0;}
-.hero .sub {color:#d7e8f2;font-size:.95rem;}
-.hero .by  {color:#93b9cc;font-size:.8rem;margin-top:.5rem;}
-div[data-testid="stMetricValue"] {font-size:1.4rem;}
-.stButton>button {border-radius:10px;font-weight:600;}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap');
+:root{
+  --ink:#0b1b2b; --navy:#10243a; --teal:#0f8b8d; --teal-2:#14b8a6; --saffron:#f59e0b;
+  --line:rgba(128,140,160,.22); --soft:rgba(15,139,141,.07);
+  --nr:#3b5b8a; --nr-bg:#e7eef8; --rnor:#9a5b00; --rnor-bg:#fdf1d8; --ror:#1d6b34; --ror-bg:#e2f4e5;
+}
+html, body, [class*="css"], .stMarkdown, .stTextArea, .stSelectbox, .stRadio { font-family:'Inter',system-ui,sans-serif; }
+#MainMenu, footer, header [data-testid="stToolbar"] {visibility:hidden;}
+header[data-testid="stHeader"]{background:transparent;height:0;}
+.block-container {padding-top:2.2rem; padding-bottom:3rem; max-width:1180px;}
+h1,h2,h3,h4 {font-family:'Plus Jakarta Sans','Inter',sans-serif; letter-spacing:-.01em;}
+
+/* Hero */
+.hero{position:relative;overflow:hidden;border-radius:22px;padding:2rem 2.2rem 1.7rem;margin-bottom:1.4rem;
+  background:radial-gradient(1200px 400px at 85% -20%,rgba(20,184,166,.35),transparent 60%),
+             radial-gradient(800px 300px at -10% 120%,rgba(245,158,11,.22),transparent 60%),
+             linear-gradient(135deg,#0b1b2b 0%,#10243a 55%,#123049 100%);
+  box-shadow:0 18px 40px -18px rgba(11,27,43,.55);}
+.hero:after{content:"";position:absolute;inset:0;opacity:.18;pointer-events:none;
+  background-image:linear-gradient(rgba(255,255,255,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.07) 1px,transparent 1px);
+  background-size:28px 28px;mask-image:linear-gradient(180deg,#000,transparent);}
+.hero .eyebrow{display:inline-flex;gap:.5rem;align-items:center;color:#9be7dd;font-size:.78rem;font-weight:600;
+  letter-spacing:.12em;text-transform:uppercase;}
+.hero .eyebrow i{width:8px;height:8px;border-radius:50%;background:var(--teal-2);box-shadow:0 0 0 4px rgba(20,184,166,.25);}
+.hero h1{color:#fff;margin:.45rem 0 .35rem;font-size:2.15rem;font-weight:800;line-height:1.15;}
+.hero p.sub{color:#c9d8e6;margin:0;font-size:1rem;max-width:760px;}
+.chips{display:flex;flex-wrap:wrap;gap:.45rem;margin-top:1rem;position:relative;z-index:1;}
+.chip{font-size:.76rem;font-weight:600;color:#e6f3f1;padding:.32rem .7rem;border-radius:999px;
+  background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);}
+.hero .by{color:#8fb0c6;font-size:.78rem;margin-top:1rem;position:relative;z-index:1;}
+
+/* Cards (bordered containers) */
+div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:18px !important;border-color:var(--line) !important;
+  box-shadow:0 1px 2px rgba(16,36,58,.04),0 8px 24px -16px rgba(16,36,58,.18);}
+.step{display:flex;gap:.85rem;align-items:flex-start;margin:.1rem 0 .7rem;}
+.step .n{flex:0 0 34px;height:34px;border-radius:11px;display:grid;place-items:center;color:#fff;font-weight:700;
+  font-family:'Plus Jakarta Sans',sans-serif;background:linear-gradient(135deg,var(--teal),#0b6f86);
+  box-shadow:0 6px 14px -6px rgba(15,139,141,.6);}
+.step h3{margin:0;font-size:1.12rem;font-weight:700;}
+.step p{margin:.15rem 0 0;font-size:.87rem;opacity:.72;}
+
+/* Buttons */
+.stButton>button,.stDownloadButton>button{border-radius:12px;font-weight:600;padding:.6rem 1rem;transition:all .15s ease;}
+.stButton>button[kind="primary"]{background:linear-gradient(135deg,var(--teal),#0b6f86);border:0;
+  box-shadow:0 10px 22px -12px rgba(15,139,141,.9);}
+.stButton>button[kind="primary"]:hover{transform:translateY(-1px);filter:brightness(1.05);}
+
+/* KPI cards */
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.8rem;margin:.4rem 0 1rem;}
+@media (max-width:820px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr));}}
+.kpi{border:1px solid var(--line);border-radius:16px;padding:.9rem 1rem;background:var(--soft);}
+.kpi .l{font-size:.74rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;opacity:.65;}
+.kpi .v{font-family:'Plus Jakarta Sans',sans-serif;font-size:1.65rem;font-weight:800;margin-top:.15rem;}
+.kpi .s{font-size:.8rem;opacity:.7;margin-top:.1rem;}
+
+/* Status pills & timeline */
+.pill{display:inline-block;padding:.12rem .55rem;border-radius:999px;font-size:.75rem;font-weight:700;}
+.pill.nr{background:var(--nr-bg);color:var(--nr);} .pill.rnor{background:var(--rnor-bg);color:var(--rnor);}
+.pill.ror{background:var(--ror-bg);color:var(--ror);}
+.timeline{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:.45rem;margin:.2rem 0 1.1rem;}
+.tl{position:relative;border-radius:12px;padding:.5rem .6rem;border:1px solid transparent;}
+.tl .fy{font-size:.72rem;font-weight:600;opacity:.8;}
+.tl .d{font-family:'Plus Jakarta Sans',sans-serif;font-size:1.05rem;font-weight:800;line-height:1.2;}
+.tl .st{font-size:.7rem;font-weight:700;letter-spacing:.04em;}
+.tl.nr{background:var(--nr-bg);color:var(--nr);border-color:rgba(59,91,138,.25);}
+.tl.rnor{background:var(--rnor-bg);color:var(--rnor);border-color:rgba(154,91,0,.25);}
+.tl.ror{background:var(--ror-bg);color:var(--ror);border-color:rgba(29,107,52,.25);}
+.tl.flag:after{content:"";position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;
+  background:var(--saffron);box-shadow:0 0 0 3px rgba(245,158,11,.22);}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--saffron);margin-right:.35rem;
+  box-shadow:0 0 0 3px rgba(245,158,11,.22);vertical-align:middle;}
+.legend{display:flex;gap:1rem;flex-wrap:wrap;font-size:.8rem;opacity:.85;margin-bottom:.3rem;}
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"]{gap:.3rem;}
+.stTabs [data-baseweb="tab"]{border-radius:10px 10px 0 0;padding:.5rem .9rem;font-weight:600;}
+.foot{text-align:center;opacity:.6;font-size:.8rem;margin-top:2rem;}
 </style>
 """
 
 HERO = """
 <div class="hero">
+  <div class="eyebrow"><i></i>Section 6 · Income-tax Act 1961 &amp; 2025</div>
   <h1>India Tax Residency Calculator</h1>
-  <p class="sub">Section 6 &nbsp;·&nbsp; Income-tax Act 1961 (up to FY 2025-26) &amp; Income-tax Act 2025 (FY 2026-27 onward)</p>
-  <p class="sub" style="font-size:.85rem;">Explanation 1(a)/1(b) year-wise &nbsp;·&nbsp; 120-day rule &nbsp;·&nbsp; Deemed residency 6(1A) &nbsp;·&nbsp; RNOR 6(6) &nbsp;·&nbsp; Missing-record checks</p>
-  <p class="by">By Aman Gautam &nbsp;·&nbsp; 8433878823</p>
+  <p class="sub">Work out residential status year by year from travel dates — with Explanation 1, the 120-day rule,
+  deemed residency and RNOR tests applied, and every gap in the record flagged.</p>
+  <div class="chips">
+    <span class="chip">Expl. 1(a) employment &amp; crew</span><span class="chip">Expl. 1(b) visits</span>
+    <span class="chip">120-day rule</span><span class="chip">Deemed resident 6(1A)</span>
+    <span class="chip">RNOR 6(6)</span><span class="chip">Missing-record checks</span>
+  </div>
+  <div class="by">By Aman Gautam · 8433878823</div>
 </div>
 """
+
+
+def step(n, title, sub=""):
+    st.markdown(f'<div class="step"><div class="n">{n}</div><div><h3>{title}</h3>'
+                f'{f"<p>{sub}</p>" if sub else ""}</div></div>', unsafe_allow_html=True)
+
+
+def kpi_html(r, rows):
+    counts = Counter(short_status(x["Status"]) for x in rows)
+    latest = rows[-1]
+    s = short_status(latest["Status"])
+    return (
+        '<div class="kpis">'
+        f'<div class="kpi"><div class="l">Total days in India</div><div class="v">{r["total"]:,}</div>'
+        f'<div class="s">across {len(rows)} financial years</div></div>'
+        f'<div class="kpi"><div class="l">Latest FY · {latest["FY"]}</div><div class="v">'
+        f'<span class="pill {s.lower()}" style="font-size:1rem">{s}</span></div>'
+        f'<div class="s">{latest["Days"]} day{"" if latest["Days"] == 1 else "s"} in India</div></div>'
+        f'<div class="kpi"><div class="l">Resident years</div><div class="v">{counts["ROR"] + counts["RNOR"]}</div>'
+        f'<div class="s">{counts["ROR"]} ROR · {counts["RNOR"]} RNOR</div></div>'
+        f'<div class="kpi"><div class="l">Non-resident years</div><div class="v">{counts["NR"]}</div>'
+        f'<div class="s">{len(r["sensitive"])} year(s) flagged to verify</div></div>'
+        '</div>')
+
+
+def timeline_html(r, rows):
+    cells = []
+    for x in rows:
+        s = short_status(x["Status"])
+        y = int(x["FY"][:4])
+        flag_cls = " flag" if y in r["sensitive"] else ""
+        cells.append(f'<div class="tl {s.lower()}{flag_cls}" title="{_esc(x["Reason"])}">'
+                     f'<div class="fy">{x["FY"][:4]}-{x["FY"][-2:]}</div><div class="d">{x["Days"]}</div>'
+                     f'<div class="st">{s}</div></div>')
+    legend = ('<div class="legend"><span><span class="pill ror">ROR</span> Resident &amp; ordinarily resident</span>'
+              '<span><span class="pill rnor">RNOR</span> Resident, not ordinarily resident</span>'
+              '<span><span class="pill nr">NR</span> Non-resident</span>'
+              '<span><span class="dot"></span>status changes under an alternative assumption (see Verify tab)</span>'
+              '</div>')
+    return legend + '<div class="timeline">' + "".join(cells) + "</div>"
+
 
 EXPLAINER = (
     "Residential status is decided **separately for every financial year** and depends on the "
@@ -426,9 +549,11 @@ EXPLAINER = (
     "**or** deemed resident. Otherwise **ROR**.\n\n"
     "### Counting days\n"
     "- Both the arrival day and the departure day count.\n"
-    "- Movements are paired in date order. A missing arrival or departure is flagged, and the "
-    "**'If missing stays were spent in India'** check shows whether the gap could change the status.\n"
-    "- A stay with no departure is counted only up to the **'Data available up to'** date you enter.\n"
+    "- Movements are paired in date order, and every missing arrival or departure is flagged.\n"
+    "- **Missing records — you choose.** Treat unrecorded periods as *outside India* (only recorded days count) "
+    "or as *in India* (a stay with no departure runs to the 'Data available up to' date, a departure with no "
+    "earlier arrival runs from the 'Data available from' date, and a gap between two departures or two "
+    "arrivals counts in full). The other choice is always shown in the Verify tab.\n"
     "- Rule 126 (crew voyage days) is not computed automatically."
 )
 
@@ -508,6 +633,8 @@ def build_html_report(r, rows):
         prof.append(f"Data from: {fmt(r['data_from'])}")
     if r.get("data_to"):
         prof.append(f"Data up to: {fmt(r['data_to'])}")
+    if r.get("missing_mode"):
+        prof.append(f"Missing records treated as: {_esc(r['missing_mode'].split(' —')[0])}")
 
     flag_rows = "".join(
         f"<tr><td>{_esc(x['FY'])}</td><td>{_esc(x[COL_SIT])}</td>"
@@ -537,8 +664,6 @@ def build_html_report(r, rows):
                      f"<tbody>{body}</tbody></table>")
 
     pairing_html = ("<h3>Pairing log</h3><pre>" + _esc("\n".join(r["log"])) + "</pre>") if r["log"] else ""
-    inc_html = ("<h3>Incomplete details — follow up with assessee</h3><ul>"
-                + "".join(f"<li>{_esc(i)}</li>" for i in r["incompletes"]) + "</ul>") if r["incompletes"] else ""
     prior_html = ""
     if r["prior_map"]:
         pm = "".join(f"<tr><td>{fy_label(y)}</td><td>{_esc(v['status'])}</td><td class='num'>{v['days']}</td></tr>"
@@ -568,7 +693,6 @@ def build_html_report(r, rows):
 {flags_html}
 {prior_html}
 {pairing_html}
-{inc_html}
 <h3>Residency by financial year</h3>
 <table><thead><tr><th>FY</th><th>Days</th><th>Status</th><th>Reason</th></tr></thead>
 <tbody>{table_rows}</tbody></table>
@@ -578,47 +702,63 @@ def build_html_report(r, rows):
 
 
 STATUS_STYLE = {
-    STATUS_NR: ("#e8eef7", "#1e3a5f"),
-    STATUS_ROR: ("#e3f4e1", "#1e5620"),
-    STATUS_RNOR: ("#fdf0d5", "#7a4b00"),
+    STATUS_NR: ("#e7eef8", "#2c4a75"),
+    STATUS_ROR: ("#e2f4e5", "#1d6b34"),
+    STATUS_RNOR: ("#fdf1d8", "#8a5200"),
 }
 
 
 def main():
-    st.set_page_config(page_title="India Tax Residency - Section 6", layout="wide")
+    st.set_page_config(page_title="India Tax Residency Calculator", page_icon="🧭", layout="wide")
     st.markdown(CSS, unsafe_allow_html=True)
     st.markdown(HERO, unsafe_allow_html=True)
-    with st.expander("How residency is decided — full explanation", expanded=False):
+    with st.expander("How residency is decided", expanded=False, **ic(":material/menu_book:")):
         st.markdown(EXPLAINER)
     st.session_state.setdefault("results", None)
 
     # ---------------- 1) INPUT ----------------
-    mode = st.radio("Input method", ["Arrival / Departure dates", "FY + Days (direct entry)"], horizontal=True)
     presence = {"days": {}, "max_days": {}, "fy_trips": {}, "log": [], "warns": [], "incompletes": []}
-    sig_parts = [mode]
+    missing_mode = MISSING_OUT
     data_from = data_to = None
-
     with st.container(border=True):
+        step(1, "Travel data", "Paste arrival and departure dates (any order), or enter days per year directly.")
+        mode = st.segmented_control("Input method", ["Arrival / Departure dates", "FY + Days (direct entry)"],
+                                    default="Arrival / Departure dates", label_visibility="collapsed") \
+            if hasattr(st, "segmented_control") else \
+            st.radio("Input method", ["Arrival / Departure dates", "FY + Days (direct entry)"], horizontal=True)
+        mode = mode or "Arrival / Departure dates"
+        sig_parts = [mode]
         if mode == "Arrival / Departure dates":
             c1, c2 = st.columns(2)
-            arr = c1.text_area("Arrival Dates", height=190, placeholder="01/04/2024  15/07/2024  10/01/2025",
+            arr = c1.text_area("Arrival dates", height=170, placeholder="01/04/2024  15/07/2024  10/01/2025",
                                help="Space / comma / newline separated. DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD")
-            dep = c2.text_area("Departure Dates", height=190, placeholder="10/06/2024  20/08/2024  25/01/2025")
-            c3, c4, c5 = st.columns(3)
+            dep = c2.text_area("Departure dates", height=170, placeholder="10/06/2024  20/08/2024  25/01/2025")
+            c3, c4, c5 = st.columns([1, 1, 1.2])
             data_from = c3.date_input("Data available from (optional)", value=None, format="DD/MM/YYYY",
                                       min_value=date(1980, 1, 1), max_value=date(2100, 1, 1),
-                                      help="Start date of the travel record. A first departure with no earlier "
-                                           "arrival is counted from this date.")
-            data_to = c4.date_input("Data available up to", value=None, format="DD/MM/YYYY",
+                                      help="Start date of the travel record. If missing periods are treated as in India, "
+                                           "a first departure with no earlier arrival is counted from this date.")
+            data_to = c4.date_input("Data available up to (optional)", value=None, format="DD/MM/YYYY",
                                     min_value=date(1980, 1, 1), max_value=date(2100, 1, 1),
-                                    help="End date of the travel record (e.g. NATGRID report date). A last arrival "
-                                         "with no departure is counted till this date.")
-            chrono = c5.radio("Pairing", ["Chronological (recommended)", "Row by row as entered"], index=0) \
-                .startswith("Chrono")
+                                    help="End date of the travel record (e.g. NATGRID report date). If missing "
+                                         "periods are treated as in India, a last arrival with no departure is "
+                                         "counted till this date.")
+            chrono = c5.radio("Pairing", ["Chronological (recommended)", "Row by row as entered"], index=0,
+                              horizontal=True).startswith("Chrono")
             presence = compute_presence(arr, dep, chrono, data_from, data_to)
-            sig_parts += [arr, dep, str(data_from), str(data_to), str(chrono)]
+            missing_mode = st.radio("Where a record is missing, treat that period as",
+                                    [MISSING_OUT, MISSING_IN], horizontal=True,
+                                    help="Applies to a stay with no departure, a departure with no earlier arrival, "
+                                         "and gaps between two departures or two arrivals. The other choice is "
+                                         "shown in the Verify tab.")
+            sig_parts += [arr, dep, str(data_from), str(data_to), str(chrono), missing_mode]
+            n_a, n_d = len(parse_dates(arr)[0]), len(parse_dates(dep)[0])
+            if n_a or n_d:
+                gaps = sum(1 for i in presence["incompletes"] if "NO " in i)
+                st.caption(f"Read **{n_a}** arrivals and **{n_d}** departures · "
+                           f"{sum(presence['days'].values())} recorded days in India across {len(presence['days'])} FYs"
+                           + (f" · :orange[{gaps} unmatched record(s)]" if gaps else " · all records matched"))
         else:
-            st.caption("Enter the financial year and total days in India for each year. Add rows as needed.")
             edited = st.data_editor(
                 pd.DataFrame({"FY": ["2024-2025"], "Days": [0]}), num_rows="dynamic",
                 **WIDE, hide_index=True, key="fy_editor",
@@ -637,20 +777,27 @@ def main():
                     d = 0
                 y = int(m.group(1))
                 days[y] = days.get(y, 0) + max(0, min(366, d))
-            for y, d in days.items():
-                if d > 366:
-                    presence["warns"].append(f"{fy_label(y)}: entered days exceed 366")
             presence["days"] = {y: min(d, 366) for y, d in days.items()}
             sig_parts.append(edited.to_json())
 
-    full_days = fill_range(presence["days"], presence["max_days"])
+    if missing_mode == MISSING_IN:
+        full_days = fill_range(presence["max_days"], presence["days"])
+        alt_days, alt_label = presence["days"], ALT_IF_OUT
+        if mode.startswith("Arrival") and any("NO DEPARTURE FOUND" in i for i in presence["incompletes"]) \
+                and not data_to:
+            st.info("A stay has no departure. Enter **Data available up to** to count it till that date.",
+                    **ic(":material/info:"))
+    else:
+        full_days = fill_range(presence["days"], presence["max_days"])
+        alt_days, alt_label = presence["max_days"], ALT_IF_IN
     years = sorted(full_days)
 
     # ---------------- 2) PROFILE ----------------
     with st.container(border=True):
-        st.subheader("Taxpayer profile")
+        step(2, "Taxpayer", "Explanation 1(a) applies only to Indian citizens; 1(b) to citizens and PIOs.")
         taxpayer_type = st.radio("Taxpayer type", ["Indian Citizen", "Person of Indian Origin (PIO)",
-                                                   "Foreign Citizen (neither)"], horizontal=True)
+                                                   "Foreign Citizen (neither)"], horizontal=True,
+                                 label_visibility="collapsed")
         is_citizen = taxpayer_type == "Indian Citizen"
         is_pio = taxpayer_type == "Person of Indian Origin (PIO)"
         sig_parts.append(taxpayer_type)
@@ -658,10 +805,9 @@ def main():
     # ---------------- 3) YEAR-WISE CIRCUMSTANCES ----------------
     flags, flags_df = {}, pd.DataFrame()
     with st.container(border=True):
-        st.subheader("Year-wise circumstances")
-        st.caption("Set the situation for each year. Use **Based abroad, came on visit(s)** for every year an "
-                   "NRI/seafarer lived abroad and visited India, and **Left India for employment** for the year "
-                   "they left. Years left on the 60-day rule are treated as an ordinary resident would be.")
+        step(3, "Year-wise circumstances",
+             "Mark <b>Based abroad, came on visit(s)</b> for each year the person lived abroad, and "
+             "<b>Left India for employment</b> for the year they left. Other years use the 60-day rule.")
         if years:
             flags, flags_df = year_flags_editor(years, full_days)
             sig_parts.append(flags_df.to_json())
@@ -669,15 +815,15 @@ def main():
                 st.info("Explanation 1 applies only to Indian citizens (and PIOs for 1(b)); "
                         "for a foreign citizen these settings are ignored.")
         else:
-            st.info("Enter dates or FY + days above to list the years.")
+            st.info("The years will appear here once travel data is entered.", **ic(":material/info:"))
 
     # ---------------- 4) PRECEDING YEARS ----------------
     prior_status, prior_days, prior_map = None, 0, {}
     with st.container(border=True):
-        st.subheader("Preceding years")
+        step(4, "Years before the data", "Feeds the 4-year (365 days), 7-year (729 days) and 9-of-10 tests "
+                                         "for the earliest years.")
         prior_choice = st.selectbox("Residential status in the years before the data", PRIOR_CHOICES,
-                                    help="Drives the 365-day (4 years), 729-day (7 years) and 9-of-10 tests for the "
-                                         "early years.")
+                                    label_visibility="collapsed")
         sig_parts.append(prior_choice)
         if prior_choice == PRIOR_CHOICES[1]:
             prior_status, prior_days = "Resident", 182
@@ -710,14 +856,14 @@ def main():
                     st.warning("Marked Resident with fewer than 60 days: " + ", ".join(bad))
                 sig_parts.append(edited_prior.to_json())
             else:
-                st.info("Enter trip / FY data above to list the preceding years.")
+                st.info("Enter travel data first to list the preceding years.")
 
     sig = hashlib.md5("|".join(sig_parts).encode()).hexdigest()
 
     # ---------------- ACTIONS ----------------
-    b1, b2 = st.columns(2)
-    calculate = b1.button("Calculate residency", type="primary", **WIDE)
-    if b2.button("Clear results", **WIDE):
+    b1, b2 = st.columns([3, 1])
+    calculate = b1.button("Calculate residency", type="primary", **ic(":material/calculate:"), **WIDE)
+    if b2.button("Clear", **ic(":material/restart_alt:"), **WIDE):
         st.session_state.results = None
         st.rerun()
 
@@ -725,10 +871,10 @@ def main():
         if not years or not any(full_days.values()):
             st.error("No data yet — enter dates (or FY + Days) first.")
         elif prior_choice == PRIOR_CHOICES[0]:
-            st.error("Please choose the residential status in the preceding years first.")
+            st.error("Choose the residential status for the years before the data (step 4).")
         else:
             residency, reasons, sensitive, scen_names = run_all(
-                full_days, presence["max_days"], flags, is_citizen, is_pio, prior_status, prior_days, prior_map)
+                full_days, alt_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map, alt_label)
             st.session_state.results = {
                 "sig": sig, "full_days": full_days, "residency": residency, "reasons": reasons,
                 "sensitive": sensitive, "scen_names": scen_names,
@@ -736,70 +882,84 @@ def main():
                 "log": presence["log"], "incompletes": presence["incompletes"],
                 "prior_choice": prior_choice, "prior_map": prior_map, "mode": mode,
                 "taxpayer_type": taxpayer_type, "data_from": data_from, "data_to": data_to,
+                "missing_mode": missing_mode if mode.startswith("Arrival") else "",
                 "flags_rows": flags_df.to_dict("records") if len(flags_df) else [],
             }
             st.rerun()
 
     r = st.session_state.results
     if not r:
-        st.info("Fill in the inputs above and click **Calculate residency**.")
+        st.markdown('<p class="foot">Fill in the steps above and click <b>Calculate residency</b>.</p>',
+                    unsafe_allow_html=True)
         return
+
+    # ---------------- RESULTS ----------------
+    st.markdown("## Results")
     if r["sig"] != sig:
-        st.warning("Inputs have changed since this result was calculated — click **Calculate residency** again.")
+        st.warning("Inputs have changed since this result was calculated — click **Calculate residency** again.",
+                   **ic(":material/sync_problem:"))
 
     rows = [{"FY": fy_label(y), "Days": r["full_days"][y], "Status": r["residency"][y][0],
              "Reason": r["reasons"][y]} for y in sorted(r["full_days"])]
     df = pd.DataFrame(rows)
+    st.markdown(kpi_html(r, rows), unsafe_allow_html=True)
+    st.markdown(timeline_html(r, rows), unsafe_allow_html=True)
 
-    m1, m2, m3 = st.columns(3)
-    with m1, st.container(border=True):
-        st.metric("Total days in India", r["total"])
-    with m2, st.container(border=True):
-        st.metric(f"Latest FY ({rows[-1]['FY']})", short_status(rows[-1]["Status"]))
-    with m3, st.container(border=True):
-        st.metric("Years analysed", len(rows))
-
-    if r["log"]:
-        with st.expander("Pairing log", expanded=False):
-            st.code("\n".join(r["log"]), language="text")
-    if r["warns"]:
-        st.warning("**Warnings**\n\n" + "\n".join(f"- {w}" for w in r["warns"]))
-    if r["incompletes"]:
-        with st.expander("Incomplete details — follow up with assessee", expanded=True):
-            for inc in r["incompletes"]:
-                st.write(f"- {inc}")
-
-    if r["sensitive"]:
-        st.warning("**Sensitivity — confirm before relying on this.** The years below change classification under "
-                   "at least one alternative assumption. The main table uses your inputs.")
-        srows = []
-        for y in sorted(r["sensitive"]):
-            row = {"FY": fy_label(y), "Days": r["full_days"][y],
-                   "Shown": short_status(r["residency"][y][0])}
-            row.update({k: short_status(v) for k, v in r["sensitive"][y].items()})
-            srows.append(row)
-        st.dataframe(pd.DataFrame(srows), **WIDE, hide_index=True)
-
-    def _row_style(row):
-        bg, fg = STATUS_STYLE.get(row["Status"], ("", ""))
-        return [f"background-color:{bg}; color:{fg}" if bg else "" for _ in row]
-
-    st.dataframe(df.style.apply(_row_style, axis=1), **WIDE, hide_index=True,
-                 column_config={"Reason": st.column_config.TextColumn(width="large")})
-
-    if r["mode"].startswith("Arrival") and r["fy_trips"]:
-        fy_choice = st.selectbox("View stays counted in FY", ["—"] + [x["FY"] for x in rows])
-        if fy_choice != "—":
-            trips = r["fy_trips"].get(int(fy_choice[:4]), [])
-            if trips:
-                st.code("\n".join(dict.fromkeys(trips)), language="text")
-            else:
-                st.info(f"No stay recorded in {fy_choice}.")
-
-    st.markdown("**Copy for Excel** — click the copy icon on the box below, then paste into a sheet.")
     tsv = "FY\tDays\tStatus\tReason\n" + "\n".join(
         f"{x['FY']}\t{x['Days']}\t{x['Status']}\t{x['Reason']}" for x in rows)
-    st.code(tsv, language="text")
+
+    n_checks = len(r["incompletes"]) + len(r["warns"])
+    tab_names = ["Year-wise table", f"Verify ({len(r['sensitive'])})", f"Data checks ({n_checks})", "Export"]
+    t_table, t_sens, t_checks, t_export = st.tabs(tab_names)
+
+    with t_table:
+        def _row_style(row):
+            bg, fg = STATUS_STYLE.get(row["Status"], ("", ""))
+            return [f"background-color:{bg}; color:{fg}" if bg else "" for _ in row]
+
+        st.dataframe(df.style.apply(_row_style, axis=1), **WIDE, hide_index=True,
+                     column_config={"FY": st.column_config.TextColumn(width="small"),
+                                    "Days": st.column_config.NumberColumn(width="small"),
+                                    "Status": st.column_config.TextColumn(width="medium"),
+                                    "Reason": st.column_config.TextColumn(width="large")})
+        st.caption("Copy for Excel — use the copy icon on the box below, then paste into a sheet.")
+        st.code(tsv, language="text")
+
+    with t_sens:
+        if r["sensitive"]:
+            st.markdown("These years change classification under at least one alternative assumption. "
+                        "The main table uses your inputs.")
+            srows = []
+            for y in sorted(r["sensitive"]):
+                row = {"FY": fy_label(y), "Days": r["full_days"][y], "Shown": short_status(r["residency"][y][0])}
+                row.update({k: short_status(v) for k, v in r["sensitive"][y].items()})
+                srows.append(row)
+            st.dataframe(pd.DataFrame(srows), **WIDE, hide_index=True)
+        else:
+            st.success("No year changes status under the alternative assumptions.", **ic(":material/verified:"))
+
+    with t_checks:
+        if r["incompletes"]:
+            st.markdown("**Follow up with assessee**")
+            for inc in r["incompletes"]:
+                st.markdown(f"- {inc}")
+        if r["warns"]:
+            st.markdown("**Warnings**")
+            for w in r["warns"]:
+                st.markdown(f"- {w}")
+        if not n_checks:
+            st.success("Every arrival has a matching departure.", **ic(":material/check_circle:"))
+        if r["log"]:
+            with st.expander("Pairing log"):
+                st.code("\n".join(r["log"]), language="text")
+        if r["mode"].startswith("Arrival") and r["fy_trips"]:
+            fy_choice = st.selectbox("View stays counted in FY", ["—"] + [x["FY"] for x in rows])
+            if fy_choice != "—":
+                trips = r["fy_trips"].get(int(fy_choice[:4]), [])
+                if trips:
+                    st.code("\n".join(dict.fromkeys(trips)), language="text")
+                else:
+                    st.info(f"No stay recorded in {fy_choice}.")
 
     report = "INDIA TAX RESIDENCY REPORT (SECTION 6)\n" + "=" * 60 + "\n"
     report += f"Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}\n" + "-" * 60 + "\n\n"
@@ -825,37 +985,37 @@ def main():
     html_report = build_html_report(r, rows)
     stamp = datetime.now().strftime("%Y%m%d")
 
-    st.markdown("### Report")
-    b64 = base64.b64encode(html_report.encode("utf-8")).decode()
-    components.html(f"""
-    <button id="printBtn" style="width:100%;padding:10px 14px;border:0;border-radius:10px;
-        background:#203a43;color:#fff;font-weight:600;font-size:14px;cursor:pointer;">
-        Print full report</button>
-    <script>
-      const B64 = "{b64}";
-      document.getElementById("printBtn").onclick = function() {{
-        const bytes = Uint8Array.from(atob(B64), c => c.charCodeAt(0));
-        const html = new TextDecoder("utf-8").decode(bytes);
-        const w = window.open("", "_blank");
-        if (!w) {{ alert("Please allow pop-ups to print, or use the HTML download."); return; }}
-        w.document.open(); w.document.write(html); w.document.close();
-        w.focus(); setTimeout(function(){{ w.print(); }}, 400);
-      }};
-    </script>""", height=60)
+    with t_export:
+        b64 = base64.b64encode(html_report.encode("utf-8")).decode()
+        components.html(f"""
+        <button id="printBtn" style="width:100%;padding:12px 14px;border:0;border-radius:12px;
+            background:linear-gradient(135deg,#0f8b8d,#0b6f86);color:#fff;font-weight:600;font-size:14px;
+            font-family:Inter,system-ui,sans-serif;cursor:pointer;box-shadow:0 10px 22px -12px rgba(15,139,141,.9);">
+            Print full report / Save as PDF</button>
+        <script>
+          const B64 = "{b64}";
+          document.getElementById("printBtn").onclick = function() {{
+            const bytes = Uint8Array.from(atob(B64), c => c.charCodeAt(0));
+            const html = new TextDecoder("utf-8").decode(bytes);
+            const w = window.open("", "_blank");
+            if (!w) {{ alert("Please allow pop-ups to print, or use the HTML download."); return; }}
+            w.document.open(); w.document.write(html); w.document.close();
+            w.focus(); setTimeout(function(){{ w.print(); }}, 400);
+          }};
+        </script>""", height=64)
+        d1, d2, d3 = st.columns(3)
+        d1.download_button("Report (.txt)", report, file_name=f"Tax_Residency_{stamp}.txt",
+                           mime="text/plain", **ic(":material/description:"), **WIDE)
+        d2.download_button("Table (.csv)", df.to_csv(index=False), file_name=f"Tax_Residency_{stamp}.csv",
+                           mime="text/csv", **ic(":material/table_view:"), **WIDE)
+        d3.download_button("Printable report (.html)", html_report, file_name=f"Tax_Residency_{stamp}.html",
+                           mime="text/html", **ic(":material/print:"), **WIDE)
+        st.caption("Print opens the report in a new tab and launches the print dialog — choose Save as PDF there. "
+                   "If pop-ups are blocked, download the HTML and open it.")
 
-    d1, d2, d3 = st.columns(3)
-    d1.download_button("Report (.txt)", report, file_name=f"Tax_Residency_{stamp}.txt",
-                       mime="text/plain", **WIDE)
-    d2.download_button("Table (.csv)", df.to_csv(index=False), file_name=f"Tax_Residency_{stamp}.csv",
-                       mime="text/csv", **WIDE)
-    d3.download_button("Printable report (.html)", html_report, file_name=f"Tax_Residency_{stamp}.html",
-                       mime="text/html", **WIDE)
-
-    st.markdown("<p style='text-align:center;color:#8a97a6;font-size:.8rem;margin-top:1.2rem;'>"
-                "Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025 · "
-                "Made with care by <b>Aman Gautam</b></p>", unsafe_allow_html=True)
+    st.markdown('<p class="foot">Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025 · '
+                'Made with care by <b>Aman Gautam</b></p>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
     main()
-    
