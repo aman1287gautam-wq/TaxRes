@@ -110,18 +110,15 @@ def parse_dates(text):
 # ---------------------------------------------------------------------
 # Presence in India from arrival / departure dates
 # ---------------------------------------------------------------------
-def compute_presence(arr_text, dep_text, chronological=True, data_from=None, data_to=None):
-    """Build the set of days the person was certainly in India, plus days that
-    may have been in India where a record is missing.
+def compute_presence(arr_text, dep_text, today=None):
+    """Smart pairing: walk all movements in date order. An arrival opens a stay,
+    the next departure closes it. Two departures in a row mean a missing arrival;
+    two arrivals in a row mean a missing departure.
 
-    Returns both counts: "days" treats unrecorded periods as outside India,
-    "max_days" treats them as in India (open-ended stays run to the data
-    start / end dates when given). The user chooses which one drives the table.
-
-    Chronological pairing walks all movements in date order:
-    an arrival opens a stay, the next departure closes it. Two departures in a
-    row mean a missing arrival; two arrivals in a row mean a missing departure.
+    "days" counts only matched arrival -> departure stays. Unmatched entries are
+    not counted and are listed in "incompletes".
     """
+    today = today or date.today()
     arrs, arr_inv = parse_dates(arr_text)
     deps, dep_inv = parse_dates(dep_text)
     certain, maybe = set(), set()
@@ -139,27 +136,12 @@ def compute_presence(arr_text, dep_text, chronological=True, data_from=None, dat
             for y in range(fy_start_year(a), fy_start_year(b) + 1):
                 fy_trips[y].append(label)
 
-    for d in arrs + deps:
-        if data_from and d < data_from:
-            warns.append(f"{fmt(d)} is before the 'Data available from' date {fmt(data_from)}")
-        if data_to and d > data_to:
-            warns.append(f"{fmt(d)} is after the 'Data available up to' date {fmt(data_to)}")
-
-    if not chronological:
-        n = max(len(arrs), len(deps))
-        for i in range(n):
-            a = arrs[i] if i < len(arrs) else None
-            d = deps[i] if i < len(deps) else None
-            if a and d and a <= d:
-                lbl = f"Row {i+1}: {fmt(a)} -> {fmt(d)} ({(d-a).days+1} days)"
-                add_span(a, d, certain, lbl)
-                log.append(lbl)
-            elif a and d:
-                warns.append(f"Row {i+1}: arrival {fmt(a)} is after departure {fmt(d)} — skipped")
-            else:
-                incompletes.append(f"Row {i+1}: {'arrival ' + fmt(a) if a else 'departure ' + fmt(d)} "
-                                   f"has no matching entry — skipped")
-        return _presence_result(certain, maybe, fy_trips, log, warns, incompletes)
+    for kind, lst in (("Arrival", arrs), ("Departure", deps)):
+        for d in lst:
+            if d > today:
+                warns.append(f"{kind} date {fmt(d)} is in the future — check for a typo")
+            if d.year < 1950:
+                warns.append(f"{kind} date {fmt(d)} looks wrong — check for a typo")
 
     events = defaultdict(lambda: {"A": [], "D": []})
     for label, lst, key in (("arrival", arrs, "A"), ("departure", deps, "D")):
@@ -180,14 +162,13 @@ def compute_presence(arr_text, dep_text, chronological=True, data_from=None, dat
             for n in ev[typ]:
                 if typ == "A":
                     if state == "in":
-                        add_span(start, start, certain, f"Arrival {start_n}: {fmt(start)} (departure missing)")
+                        add_span(start, start, maybe, f"Arrival {start_n}: {fmt(start)} (departure missing)")
                         gap = (d - start).days - 1
                         if gap > 0:
                             add_span(start + timedelta(days=1), d - timedelta(days=1), maybe)
                         msg = (f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE before next arrival on {fmt(d)}")
                         log.append(msg)
-                        incompletes.append(f"{msg}: departure date missing; up to {max(gap, 0)} more day(s) "
-                                           f"may have been spent in India")
+                        incompletes.append(f"{msg} — not counted")
                     state, start, start_n = "in", d, n
                 else:
                     if state == "in":
@@ -195,37 +176,25 @@ def compute_presence(arr_text, dep_text, chronological=True, data_from=None, dat
                         add_span(start, d, certain, lbl)
                         log.append(lbl)
                     elif state is None:
-                        add_span(d, d, certain, f"Departure {n}: {fmt(d)} (no earlier arrival)")
-                        msg = f"Departure {n} ({fmt(d)}) -> NO ARRIVAL (no record before it)"
+                        add_span(d, d, maybe, f"Departure {n}: {fmt(d)} (no earlier arrival)")
+                        msg = f"Departure {n} ({fmt(d)}) -> NO ARRIVAL before it"
                         log.append(msg)
-                        if data_from and data_from < d:
-                            add_span(data_from, d - timedelta(days=1), maybe)
-                            extra = (f"; {(d - data_from).days} unrecorded day(s) from the data start "
-                                     f"{fmt(data_from)}")
-                        else:
-                            extra = ""
-                        incompletes.append(f"{msg}: no arrival on record before this date{extra}")
+                        incompletes.append(f"{msg} — not counted")
                     else:  # two departures in a row
-                        add_span(d, d, certain, f"Departure {n}: {fmt(d)} (arrival missing)")
+                        add_span(d, d, maybe, f"Departure {n}: {fmt(d)} (arrival missing)")
                         gap = (d - last_dep).days - 1
                         if gap > 0:
                             add_span(last_dep + timedelta(days=1), d - timedelta(days=1), maybe)
                         msg = f"Departure {n} ({fmt(d)}) -> NO ARRIVAL after previous departure on {fmt(last_dep)}"
                         log.append(msg)
-                        incompletes.append(f"{msg}: arrival date missing; up to {max(gap, 0)} more day(s) "
-                                           f"may have been spent in India")
+                        incompletes.append(f"{msg} — not counted")
                     state, last_dep = "out", d
 
     if state == "in":
-        add_span(start, start, certain, f"Arrival {start_n}: {fmt(start)} (no later departure)")
+        add_span(start, start, maybe, f"Arrival {start_n}: {fmt(start)} (no later departure)")
         msg = f"Arrival {start_n} ({fmt(start)}) -> NO DEPARTURE FOUND"
         log.append(msg)
-        if data_to and data_to > start:
-            add_span(start + timedelta(days=1), data_to, maybe)
-            extra = (f"; {(data_to - start).days} unrecorded day(s) up to the data end {fmt(data_to)}")
-        else:
-            extra = ""
-        incompletes.append(f"{msg}: no departure on record after this date{extra}")
+        incompletes.append(f"{msg} — not counted")
 
     return _presence_result(certain, maybe, fy_trips, log, warns, incompletes)
 
@@ -279,6 +248,8 @@ def classify_years(full_days, flags, is_citizen, is_pio, prior_status, prior_day
     residency, reasons = {}, {}
     prior_map = prior_map or {}
     default_res = STATUS_NR if prior_status == "Non-Resident" else STATUS_ROR
+    excl = {y: min(int(flags.get(y, {}).get("excl", 0) or 0), d) for y, d in full_days.items()}
+    full_days = {y: d - excl[y] for y, d in full_days.items()}
 
     def days_in(y):
         if y in full_days:
@@ -299,6 +270,8 @@ def classify_years(full_days, flags, is_citizen, is_pio, prior_status, prior_day
         f = flags.get(y, {})
         threshold, only_182, note = basic_threshold(y, is_citizen, is_pio, f)
         tag = f"[{note}] " if note else ""
+        if excl[y]:
+            tag += f"[{excl[y]} day(s) excluded, {days} counted] "
         prior4 = sum(days_in(y - i) for i in range(1, 5))
         new_rules = y >= AMENDMENT_2020
 
@@ -351,15 +324,7 @@ def classify_years(full_days, flags, is_citizen, is_pio, prior_status, prior_day
     return residency, reasons
 
 
-MISSING_OUT = "Outside India — count only recorded days"
-MISSING_IN = "In India — count unrecorded periods as days in India"
-ALT_IF_IN = "If missing stays were spent in India"
-ALT_IF_OUT = "If missing stays were outside India"
-
-
-def run_all(full_days, max_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map,
-            alt_label=ALT_IF_IN):
-    """max_days: the alternative day counts for the missing-record check (named for the default case)."""
+def run_all(full_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map):
     """Main result plus the sensitivity scenarios."""
     residency, reasons = classify_years(full_days, flags, is_citizen, is_pio,
                                         prior_status, prior_days, prior_map)
@@ -372,10 +337,6 @@ def run_all(full_days, max_days, flags, is_citizen, is_pio, prior_status, prior_
         plain = {y: {**f, "sit": SIT_NORMAL} for y, f in flags.items()}
         scen["Plain 60-day rule (no Expl. 1)"] = classify_years(
             full_days, plain, is_citizen, is_pio, prior_status, prior_days, prior_map)[0]
-    if max_days and any(max_days.get(y, 0) != full_days.get(y, 0) for y in full_days):
-        mx = {y: max_days.get(y, 0) for y in full_days}
-        scen[alt_label] = classify_years(
-            mx, flags, is_citizen, is_pio, prior_status, prior_days, prior_map)[0]
 
     sensitive = {}
     for y in full_days:
@@ -550,15 +511,32 @@ EXPLAINER = (
     "### Counting days\n"
     "- Both the arrival day and the departure day count.\n"
     "- Movements are paired in date order, and every missing arrival or departure is flagged.\n"
-    "- **Missing records — you choose.** Treat unrecorded periods as *outside India* (only recorded days count) "
-    "or as *in India* (a stay with no departure runs to the 'Data available up to' date, a departure with no "
-    "earlier arrival runs from the 'Data available from' date, and a gap between two departures or two "
-    "arrivals counts in full). The other choice is always shown in the Verify tab.\n"
-    "- Rule 126 (crew voyage days) is not computed automatically."
+    "- An arrival or departure with no match is not counted; it is listed under **Incomplete details** "
+    "to follow up with the assessee.\n"
+    "- Days that the law says not to count — crew voyage days under Rule 126, or Covid lockdown days in "
+    "FY 2019-20 under CBDT Circular 11/2020 — can be entered per year with **Exclude days**."
 )
 
 PRIOR_CHOICES = ["— select —", "Resident in all preceding years",
                  "Non-Resident in all preceding years (0 days)", "Enter each preceding year"]
+
+
+COL_EMP = "Left India for employment [1(a)]"
+COL_VISIT = "Based abroad, visiting [1(b)]"
+COL_CREW = "Left as crew of Indian ship [1(a)]"
+COL_EXCL = "Days to exclude"
+TICK_COLS = [COL_EMP, COL_VISIT, COL_CREW, COL_INC, COL_NOTAX]
+
+
+def situation_of(emp, crew, visit):
+    """One Explanation-1 situation per year. 1(a) takes precedence if more than one is ticked."""
+    if emp:
+        return SIT_EMP
+    if crew:
+        return SIT_CREW
+    if visit:
+        return SIT_VISIT
+    return SIT_NORMAL
 
 
 def build_flags_df(years, days_map, prev):
@@ -569,18 +547,29 @@ def build_flags_df(years, days_map, prev):
     rows = []
     for y in years:
         o = old.get(fy_label(y))
-        rows.append({
-            "FY": fy_label(y),
-            "Days": int(days_map.get(y, 0)),
-            COL_SIT: (o[COL_SIT] if o is not None and o[COL_SIT] in SITUATIONS else SIT_NORMAL),
-            COL_INC: bool(o[COL_INC]) if o is not None else False,
-            COL_NOTAX: bool(o[COL_NOTAX]) if o is not None else False,
-        })
+        row = {"FY": fy_label(y), "Days": int(days_map.get(y, 0))}
+        for c in TICK_COLS:
+            row[c] = bool(o[c]) if o is not None and c in o else False
+        try:
+            row[COL_EXCL] = int(o[COL_EXCL]) if o is not None and COL_EXCL in o and pd.notna(o[COL_EXCL]) else 0
+        except (ValueError, TypeError):
+            row[COL_EXCL] = 0
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
 def year_flags_editor(years, days_map):
     ss = st.session_state
+    show_inc = st.toggle("Also set Indian income > Rs.15L / Not liable to tax abroad (FY 2020-21 onward)",
+                         key="show_inc_cols",
+                         help="Needed only for the 120-day rule, deemed residency u/s 6(1A) and RNOR u/s 6(6)(c).")
+    show_excl = st.toggle("Exclude days (crew voyage days under Rule 126 / Covid relief for FY 2019-20)",
+                          key="show_excl_col",
+                          help="Rule 126: for an Indian citizen crew member, days on an eligible voyage (per the "
+                               "Continuous Discharge Certificate) are not counted as days in India. "
+                               "CBDT Circular 11/2020: for FY 2019-20, days a visitor was stuck in India due to the "
+                               "Covid lockdown (up to 31.03.2020) are excluded, subject to the circular's conditions.")
+    tick_cols = TICK_COLS if show_inc else [COL_EMP, COL_VISIT, COL_CREW]
     sig = tuple((y, days_map.get(y, 0)) for y in years)
     if ss.get("yf_sig") != sig:
         ss["yf_base"] = build_flags_df(years, days_map, ss.get("yf_current"))
@@ -588,18 +577,18 @@ def year_flags_editor(years, days_map):
         ss["yf_ver"] = ss.get("yf_ver", 0) + 1
 
     labels = [fy_label(y) for y in years]
-    with st.expander("Quick fill a range of years", expanded=False):
+    with st.expander("Tick a range of years at once", expanded=False):
         q1, q2, q3 = st.columns([1, 1, 2])
         f_from = q1.selectbox("From FY", labels, index=0, key="qf_from")
         f_to = q2.selectbox("To FY", labels, index=len(labels) - 1, key="qf_to")
-        f_sit = q3.selectbox("Situation", SITUATIONS, index=3, key="qf_sit")
-        if st.button("Apply to range"):
-            lo, hi = int(f_from[:4]), int(f_to[:4])
-            if lo > hi:
-                lo, hi = hi, lo
+        f_col = q3.selectbox("Column", tick_cols, index=1, key="qf_col")
+        a1, a2, _ = st.columns([1, 1, 2])
+        tick, untick = a1.button("Tick range", **WIDE), a2.button("Untick range", **WIDE)
+        if tick or untick:
+            lo, hi = sorted((int(f_from[:4]), int(f_to[:4])))
             df = (ss.get("yf_current") if ss.get("yf_current") is not None else ss["yf_base"]).copy()
             mask = df["FY"].str[:4].astype(int).between(lo, hi)
-            df.loc[mask, COL_SIT] = f_sit
+            df.loc[mask, f_col] = bool(tick)
             ss["yf_base"] = build_flags_df(years, days_map, df)
             ss["yf_ver"] += 1
             st.rerun()
@@ -607,41 +596,62 @@ def year_flags_editor(years, days_map):
     edited = st.data_editor(
         ss["yf_base"], hide_index=True, **WIDE,
         key=f"yf_editor_{ss['yf_ver']}", disabled=["FY", "Days"],
+        column_order=["FY", "Days"] + tick_cols + ([COL_EXCL] if show_excl else []),
         column_config={
             "FY": st.column_config.TextColumn("FY", width="small"),
             "Days": st.column_config.NumberColumn("Days in India", width="small"),
-            COL_SIT: st.column_config.SelectboxColumn(COL_SIT, options=SITUATIONS, required=True, width="large"),
-            COL_INC: st.column_config.CheckboxColumn(COL_INC, help="Total income other than foreign-source income "
-                                                     "exceeds Rs.15 lakh (relevant from FY 2020-21)"),
-            COL_NOTAX: st.column_config.CheckboxColumn(COL_NOTAX, help="Citizen not liable to tax in any other "
-                                                       "country — for deemed residency u/s 6(1A)"),
+            COL_EMP: st.column_config.CheckboxColumn(
+                COL_EMP, help="Indian citizen who left India in this FY for employment outside India: "
+                              "60 days becomes 182 [Expl. 1(a)]"),
+            COL_VISIT: st.column_config.CheckboxColumn(
+                COL_VISIT, help="Citizen/PIO living outside India who came on visit(s) in this FY: 60 days "
+                                "becomes 182, or 120 from FY 2020-21 if Indian income > Rs.15L [Expl. 1(b)]"),
+            COL_CREW: st.column_config.CheckboxColumn(
+                COL_CREW, help="Indian citizen who left India in this FY as crew of an Indian ship [Expl. 1(a)]"),
+            COL_INC: st.column_config.CheckboxColumn(
+                COL_INC, help="Total income other than foreign-source income exceeds Rs.15 lakh "
+                              "(relevant from FY 2020-21)"),
+            COL_NOTAX: st.column_config.CheckboxColumn(
+                COL_NOTAX, help="Citizen not liable to tax in any other country — for deemed residency u/s 6(1A)"),
+            COL_EXCL: st.column_config.NumberColumn(
+                COL_EXCL, min_value=0, max_value=366, step=1, width="small",
+                help="Days in India that do not count for this FY (Rule 126 voyage days, Covid relief)"),
         },
     )
     ss["yf_current"] = edited
-    flags = {}
+    flags, rows = {}, []
+    both = []
     for _, r in edited.iterrows():
         y = int(str(r["FY"])[:4])
-        flags[y] = {"sit": r[COL_SIT] if r[COL_SIT] in SITUATIONS else SIT_NORMAL,
-                    "inc15": bool(r[COL_INC]), "notax": bool(r[COL_NOTAX])}
-    return flags, edited
+        emp, crew, visit = bool(r[COL_EMP]), bool(r[COL_CREW]), bool(r[COL_VISIT])
+        inc15 = show_inc and bool(r[COL_INC])
+        notax = show_inc and bool(r[COL_NOTAX])
+        try:
+            ex = int(r[COL_EXCL]) if show_excl and pd.notna(r[COL_EXCL]) else 0
+        except (ValueError, TypeError):
+            ex = 0
+        sit = situation_of(emp, crew, visit)
+        if (emp or crew) and visit:
+            both.append(fy_label(y))
+        flags[y] = {"sit": sit, "inc15": inc15, "notax": notax, "excl": max(0, ex)}
+        rows.append({"FY": fy_label(y), COL_SIT: sit, COL_INC: inc15, COL_NOTAX: notax, COL_EXCL: max(0, ex)})
+    if both:
+        st.caption(f"Both 1(a) and 1(b) ticked for {', '.join(both)} — 1(a) (182 days) is applied for those years.")
+    return flags, pd.DataFrame(rows)
 
 
 def build_html_report(r, rows):
     now = datetime.now().strftime("%d %B %Y, %I:%M %p")
     prof = [f"Type: {_esc(r['taxpayer_type'])}", f"Preceding years: {_esc(r['prior_choice'])}"]
-    if r.get("data_from"):
-        prof.append(f"Data from: {fmt(r['data_from'])}")
-    if r.get("data_to"):
-        prof.append(f"Data up to: {fmt(r['data_to'])}")
-    if r.get("missing_mode"):
-        prof.append(f"Missing records treated as: {_esc(r['missing_mode'].split(' —')[0])}")
 
     flag_rows = "".join(
         f"<tr><td>{_esc(x['FY'])}</td><td>{_esc(x[COL_SIT])}</td>"
-        f"<td>{'Yes' if x[COL_INC] else ''}</td><td>{'Yes' if x[COL_NOTAX] else ''}</td></tr>"
-        for x in r["flags_rows"] if x[COL_SIT] != SIT_NORMAL or x[COL_INC] or x[COL_NOTAX])
+        f"<td>{'Yes' if x[COL_INC] else ''}</td><td>{'Yes' if x[COL_NOTAX] else ''}</td>"
+        f"<td class='num'>{x.get(COL_EXCL) or ''}</td></tr>"
+        for x in r["flags_rows"] if x[COL_SIT] != SIT_NORMAL or x[COL_INC] or x[COL_NOTAX] or x.get(COL_EXCL))
     flags_html = ("<h3>Year-wise circumstances applied</h3><table><thead><tr><th>FY</th><th>Situation</th>"
-                  f"<th>{COL_INC}</th><th>{COL_NOTAX}</th></tr></thead><tbody>{flag_rows}</tbody></table>"
+                  f"<th>{COL_INC}</th><th>{COL_NOTAX}</th><th>{COL_EXCL}</th></tr></thead>"
+                  f"<tbody>{flag_rows}</tbody></table>"
                   if flag_rows else "")
 
     table_rows = "".join(
@@ -663,7 +673,7 @@ def build_html_report(r, rows):
                      f"<table><thead><tr><th>FY</th><th>Days</th><th>Shown</th>{heads}</tr></thead>"
                      f"<tbody>{body}</tbody></table>")
 
-    pairing_html = ("<h3>Pairing log</h3><pre>" + _esc("\n".join(r["log"])) + "</pre>") if r["log"] else ""
+    pairing_html = ("<h3>Smart pairing log</h3><pre>" + _esc("\n".join(r["log"])) + "</pre>") if r["log"] else ""
     prior_html = ""
     if r["prior_map"]:
         pm = "".join(f"<tr><td>{fy_label(y)}</td><td>{_esc(v['status'])}</td><td class='num'>{v['days']}</td></tr>"
@@ -718,8 +728,6 @@ def main():
 
     # ---------------- 1) INPUT ----------------
     presence = {"days": {}, "max_days": {}, "fy_trips": {}, "log": [], "warns": [], "incompletes": []}
-    missing_mode = MISSING_OUT
-    data_from = data_to = None
     with st.container(border=True):
         step(1, "Travel data", "Paste arrival and departure dates (any order), or enter days per year directly.")
         mode = st.segmented_control("Input method", ["Arrival / Departure dates", "FY + Days (direct entry)"],
@@ -733,30 +741,13 @@ def main():
             arr = c1.text_area("Arrival dates", height=170, placeholder="01/04/2024  15/07/2024  10/01/2025",
                                help="Space / comma / newline separated. DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD")
             dep = c2.text_area("Departure dates", height=170, placeholder="10/06/2024  20/08/2024  25/01/2025")
-            c3, c4, c5 = st.columns([1, 1, 1.2])
-            data_from = c3.date_input("Data available from (optional)", value=None, format="DD/MM/YYYY",
-                                      min_value=date(1980, 1, 1), max_value=date(2100, 1, 1),
-                                      help="Start date of the travel record. If missing periods are treated as in India, "
-                                           "a first departure with no earlier arrival is counted from this date.")
-            data_to = c4.date_input("Data available up to (optional)", value=None, format="DD/MM/YYYY",
-                                    min_value=date(1980, 1, 1), max_value=date(2100, 1, 1),
-                                    help="End date of the travel record (e.g. NATGRID report date). If missing "
-                                         "periods are treated as in India, a last arrival with no departure is "
-                                         "counted till this date.")
-            chrono = c5.radio("Pairing", ["Chronological (recommended)", "Row by row as entered"], index=0,
-                              horizontal=True).startswith("Chrono")
-            presence = compute_presence(arr, dep, chrono, data_from, data_to)
-            missing_mode = st.radio("Where a record is missing, treat that period as",
-                                    [MISSING_OUT, MISSING_IN], horizontal=True,
-                                    help="Applies to a stay with no departure, a departure with no earlier arrival, "
-                                         "and gaps between two departures or two arrivals. The other choice is "
-                                         "shown in the Verify tab.")
-            sig_parts += [arr, dep, str(data_from), str(data_to), str(chrono), missing_mode]
+            presence = compute_presence(arr, dep)
+            sig_parts += [arr, dep]
             n_a, n_d = len(parse_dates(arr)[0]), len(parse_dates(dep)[0])
             if n_a or n_d:
                 gaps = sum(1 for i in presence["incompletes"] if "NO " in i)
                 st.caption(f"Read **{n_a}** arrivals and **{n_d}** departures · "
-                           f"{sum(presence['days'].values())} recorded days in India across {len(presence['days'])} FYs"
+                           f"{sum(presence['days'].values())} days in India across {len(presence['days'])} FYs"
                            + (f" · :orange[{gaps} unmatched record(s)]" if gaps else " · all records matched"))
         else:
             edited = st.data_editor(
@@ -776,20 +767,21 @@ def main():
                 except (ValueError, TypeError):
                     d = 0
                 y = int(m.group(1))
-                days[y] = days.get(y, 0) + max(0, min(366, d))
+                if y in days:
+                    presence["warns"].append(f"{fy_label(y)} entered more than once — the days are added together")
+                days[y] = days.get(y, 0) + max(0, d)
+            for y, d in days.items():
+                if d > 366:
+                    presence["warns"].append(f"{fy_label(y)}: {d} days is more than a year — capped at 366")
             presence["days"] = {y: min(d, 366) for y, d in days.items()}
+            if days:
+                gaps = [fy_label(y) for y in range(min(days), max(days) + 1) if y not in days]
+                if gaps:
+                    presence["warns"].append("Not entered, taken as 0 days: " + ", ".join(gaps))
+                    st.warning("These FYs were not entered and will be taken as **0 days**: " + ", ".join(gaps))
             sig_parts.append(edited.to_json())
 
-    if missing_mode == MISSING_IN:
-        full_days = fill_range(presence["max_days"], presence["days"])
-        alt_days, alt_label = presence["days"], ALT_IF_OUT
-        if mode.startswith("Arrival") and any("NO DEPARTURE FOUND" in i for i in presence["incompletes"]) \
-                and not data_to:
-            st.info("A stay has no departure. Enter **Data available up to** to count it till that date.",
-                    **ic(":material/info:"))
-    else:
-        full_days = fill_range(presence["days"], presence["max_days"])
-        alt_days, alt_label = presence["max_days"], ALT_IF_IN
+    full_days = fill_range(presence["days"])
     years = sorted(full_days)
 
     # ---------------- 2) PROFILE ----------------
@@ -798,6 +790,9 @@ def main():
         taxpayer_type = st.radio("Taxpayer type", ["Indian Citizen", "Person of Indian Origin (PIO)",
                                                    "Foreign Citizen (neither)"], horizontal=True,
                                  label_visibility="collapsed")
+        if taxpayer_type.startswith("Person of Indian Origin"):
+            st.caption("PIO: the person, or either parent, or any grandparent, was born in undivided India "
+                       "[Explanation 1 to Section 6(1)].")
         is_citizen = taxpayer_type == "Indian Citizen"
         is_pio = taxpayer_type == "Person of Indian Origin (PIO)"
         sig_parts.append(taxpayer_type)
@@ -806,8 +801,8 @@ def main():
     flags, flags_df = {}, pd.DataFrame()
     with st.container(border=True):
         step(3, "Year-wise circumstances",
-             "Mark <b>Based abroad, came on visit(s)</b> for each year the person lived abroad, and "
-             "<b>Left India for employment</b> for the year they left. Other years use the 60-day rule.")
+             "Tick <b>Left India for employment</b> for the year they left, and <b>Based abroad, visiting</b> "
+             "for each year they lived abroad and visited. Unticked years use the 60-day rule.")
         if years:
             flags, flags_df = year_flags_editor(years, full_days)
             sig_parts.append(flags_df.to_json())
@@ -874,15 +869,14 @@ def main():
             st.error("Choose the residential status for the years before the data (step 4).")
         else:
             residency, reasons, sensitive, scen_names = run_all(
-                full_days, alt_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map, alt_label)
+                full_days, flags, is_citizen, is_pio, prior_status, prior_days, prior_map)
             st.session_state.results = {
                 "sig": sig, "full_days": full_days, "residency": residency, "reasons": reasons,
                 "sensitive": sensitive, "scen_names": scen_names,
                 "total": sum(full_days.values()), "warns": presence["warns"], "fy_trips": presence["fy_trips"],
                 "log": presence["log"], "incompletes": presence["incompletes"],
                 "prior_choice": prior_choice, "prior_map": prior_map, "mode": mode,
-                "taxpayer_type": taxpayer_type, "data_from": data_from, "data_to": data_to,
-                "missing_mode": missing_mode if mode.startswith("Arrival") else "",
+                "taxpayer_type": taxpayer_type,
                 "flags_rows": flags_df.to_dict("records") if len(flags_df) else [],
             }
             st.rerun()
@@ -908,9 +902,36 @@ def main():
     tsv = "FY\tDays\tStatus\tReason\n" + "\n".join(
         f"{x['FY']}\t{x['Days']}\t{x['Status']}\t{x['Reason']}" for x in rows)
 
+    report = "INDIA TAX RESIDENCY REPORT (SECTION 6)\n" + "=" * 60 + "\n"
+    report += f"Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}\n" + "-" * 60 + "\n\n"
+    report += f"Taxpayer: {r['taxpayer_type']} | Preceding years: {r['prior_choice']}\n\n"
+    applied = [x for x in r["flags_rows"] if x[COL_SIT] != SIT_NORMAL or x[COL_INC] or x[COL_NOTAX]
+               or x.get(COL_EXCL)]
+    if applied:
+        report += "YEAR-WISE CIRCUMSTANCES:\n" + "\n".join(
+            f"- {x['FY']}: {x[COL_SIT]}{' | Indian income > Rs.15L' if x[COL_INC] else ''}"
+            f"{' | not liable to tax abroad' if x[COL_NOTAX] else ''}"
+            f"{' | ' + str(x[COL_EXCL]) + ' day(s) excluded' if x.get(COL_EXCL) else ''}" for x in applied) + "\n\n"
+    if r["sensitive"]:
+        report += "SENSITIVITY (verify before relying):\n"
+        for y in sorted(r["sensitive"]):
+            report += f"- {fy_label(y)}: {short_status(r['residency'][y][0])} as shown | " + " | ".join(
+                f"{k}: {short_status(v)}" for k, v in r["sensitive"][y].items()) + "\n"
+        report += "\n"
+    if r["log"]:
+        report += "SMART PAIRING LOG:\n" + "\n".join(r["log"]) + "\n\n"
+    if r["incompletes"]:
+        report += "INCOMPLETE DETAILS (FOLLOW UP WITH ASSESSEE):\n" + "\n".join(f"- {i}" for i in r["incompletes"]) + "\n\n"
+    report += tsv + f"\n\nTOTAL DAYS IN INDIA: {r['total']}\n"
+    report += "Calculator by: Aman Gautam (8433878823)\n"
+
+    html_report = build_html_report(r, rows)
+    stamp = datetime.now().strftime("%Y%m%d")
+
     n_checks = len(r["incompletes"]) + len(r["warns"])
-    tab_names = ["Year-wise table", f"Verify ({len(r['sensitive'])})", f"Data checks ({n_checks})", "Export"]
-    t_table, t_sens, t_checks, t_export = st.tabs(tab_names)
+    tab_names = ["Year-wise table", "Smart pairing log", f"Verify ({len(r['sensitive'])})",
+                 f"Incomplete details ({n_checks})"]
+    t_table, t_log, t_sens, t_checks = st.tabs(tab_names)
 
     with t_table:
         def _row_style(row):
@@ -922,70 +943,6 @@ def main():
                                     "Days": st.column_config.NumberColumn(width="small"),
                                     "Status": st.column_config.TextColumn(width="medium"),
                                     "Reason": st.column_config.TextColumn(width="large")})
-        st.caption("Copy for Excel — use the copy icon on the box below, then paste into a sheet.")
-        st.code(tsv, language="text")
-
-    with t_sens:
-        if r["sensitive"]:
-            st.markdown("These years change classification under at least one alternative assumption. "
-                        "The main table uses your inputs.")
-            srows = []
-            for y in sorted(r["sensitive"]):
-                row = {"FY": fy_label(y), "Days": r["full_days"][y], "Shown": short_status(r["residency"][y][0])}
-                row.update({k: short_status(v) for k, v in r["sensitive"][y].items()})
-                srows.append(row)
-            st.dataframe(pd.DataFrame(srows), **WIDE, hide_index=True)
-        else:
-            st.success("No year changes status under the alternative assumptions.", **ic(":material/verified:"))
-
-    with t_checks:
-        if r["incompletes"]:
-            st.markdown("**Follow up with assessee**")
-            for inc in r["incompletes"]:
-                st.markdown(f"- {inc}")
-        if r["warns"]:
-            st.markdown("**Warnings**")
-            for w in r["warns"]:
-                st.markdown(f"- {w}")
-        if not n_checks:
-            st.success("Every arrival has a matching departure.", **ic(":material/check_circle:"))
-        if r["log"]:
-            with st.expander("Pairing log"):
-                st.code("\n".join(r["log"]), language="text")
-        if r["mode"].startswith("Arrival") and r["fy_trips"]:
-            fy_choice = st.selectbox("View stays counted in FY", ["—"] + [x["FY"] for x in rows])
-            if fy_choice != "—":
-                trips = r["fy_trips"].get(int(fy_choice[:4]), [])
-                if trips:
-                    st.code("\n".join(dict.fromkeys(trips)), language="text")
-                else:
-                    st.info(f"No stay recorded in {fy_choice}.")
-
-    report = "INDIA TAX RESIDENCY REPORT (SECTION 6)\n" + "=" * 60 + "\n"
-    report += f"Generated: {datetime.now().strftime('%d %B %Y, %I:%M %p')}\n" + "-" * 60 + "\n\n"
-    report += f"Taxpayer: {r['taxpayer_type']} | Preceding years: {r['prior_choice']}\n\n"
-    applied = [x for x in r["flags_rows"] if x[COL_SIT] != SIT_NORMAL or x[COL_INC] or x[COL_NOTAX]]
-    if applied:
-        report += "YEAR-WISE CIRCUMSTANCES:\n" + "\n".join(
-            f"- {x['FY']}: {x[COL_SIT]}{' | Indian income > Rs.15L' if x[COL_INC] else ''}"
-            f"{' | not liable to tax abroad' if x[COL_NOTAX] else ''}" for x in applied) + "\n\n"
-    if r["sensitive"]:
-        report += "SENSITIVITY (verify before relying):\n"
-        for y in sorted(r["sensitive"]):
-            report += f"- {fy_label(y)}: {short_status(r['residency'][y][0])} as shown | " + " | ".join(
-                f"{k}: {short_status(v)}" for k, v in r["sensitive"][y].items()) + "\n"
-        report += "\n"
-    if r["log"]:
-        report += "PAIRING LOG:\n" + "\n".join(r["log"]) + "\n\n"
-    if r["incompletes"]:
-        report += "INCOMPLETE DETAILS (FOLLOW UP WITH ASSESSEE):\n" + "\n".join(f"- {i}" for i in r["incompletes"]) + "\n\n"
-    report += tsv + f"\n\nTOTAL DAYS IN INDIA: {r['total']}\n"
-    report += "Calculator by: Aman Gautam (8433878823)\n"
-
-    html_report = build_html_report(r, rows)
-    stamp = datetime.now().strftime("%Y%m%d")
-
-    with t_export:
         b64 = base64.b64encode(html_report.encode("utf-8")).decode()
         components.html(f"""
         <button id="printBtn" style="width:100%;padding:12px 14px;border:0;border-radius:12px;
@@ -1012,6 +969,50 @@ def main():
                            mime="text/html", **ic(":material/print:"), **WIDE)
         st.caption("Print opens the report in a new tab and launches the print dialog — choose Save as PDF there. "
                    "If pop-ups are blocked, download the HTML and open it.")
+
+        st.caption("Copy for Excel — use the copy icon on the box below, then paste into a sheet.")
+        st.code(tsv, language="text")
+
+    with t_log:
+        if r["log"]:
+            st.caption("Each arrival is matched with the next departure in date order. "
+                       "Lines with NO ARRIVAL / NO DEPARTURE are missing records.")
+            st.code("\n".join(r["log"]), language="text")
+        else:
+            st.info("The pairing log is available when travel dates are entered.")
+
+    with t_sens:
+        if r["sensitive"]:
+            st.markdown("These years change classification under at least one alternative assumption. "
+                        "The main table uses your inputs.")
+            srows = []
+            for y in sorted(r["sensitive"]):
+                row = {"FY": fy_label(y), "Days": r["full_days"][y], "Shown": short_status(r["residency"][y][0])}
+                row.update({k: short_status(v) for k, v in r["sensitive"][y].items()})
+                srows.append(row)
+            st.dataframe(pd.DataFrame(srows), **WIDE, hide_index=True)
+        else:
+            st.success("No year changes status under the alternative assumptions.", **ic(":material/verified:"))
+
+    with t_checks:
+        if r["incompletes"]:
+            st.markdown("**Follow up with assessee** — these entries are not counted in the table")
+            for inc in r["incompletes"]:
+                st.markdown(f"- {inc}")
+        if r["warns"]:
+            st.markdown("**Warnings**")
+            for w in r["warns"]:
+                st.markdown(f"- {w}")
+        if not n_checks:
+            st.success("Every arrival has a matching departure.", **ic(":material/check_circle:"))
+        if r["mode"].startswith("Arrival") and r["fy_trips"]:
+            fy_choice = st.selectbox("View stays counted in FY", ["—"] + [x["FY"] for x in rows])
+            if fy_choice != "—":
+                trips = r["fy_trips"].get(int(fy_choice[:4]), [])
+                if trips:
+                    st.code("\n".join(dict.fromkeys(trips)), language="text")
+                else:
+                    st.info(f"No stay recorded in {fy_choice}.")
 
     st.markdown('<p class="foot">Section 6(1) · 6(1A) · 6(6) — Income-tax Act 1961 &amp; 2025 · '
                 'Made with care by <b>Aman Gautam</b></p>', unsafe_allow_html=True)
